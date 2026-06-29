@@ -30,6 +30,13 @@ While `validation_gate = red`, `max_allowed_action` must remain `PAPER_ONLY` on 
 CSV row. This is enforced automatically by `validate_watchlist.py`. Do not attempt to
 raise it manually.
 
+**Status update (2026-06-29):** Strategy Classification v0.2 is **implemented and
+CI-confirmed** (GitHub Actions artifact `dlmm-run-28375624302`). This does **not** change
+any gate: `validation_gate` remains **red**, `max_allowed_action` remains **PAPER_ONLY**,
+and live execution remains **forbidden**. CI confirms the pipeline mechanism works — it is
+**not** a claim of live readiness or profitability. `TACTICAL` is observe-only;
+`PAPER_TEST_ALLOWED` means paper-only, never live.
+
 ---
 
 ## Forbidden Actions — Never Implement
@@ -51,55 +58,97 @@ to confirm intent before proceeding.
 
 ---
 
-## Next Task: Strategy Classification v0.2
+## Completed: Strategy Classification v0.2 (CI-confirmed 2026-06-29)
 
-The next planned work unit is **Strategy Classification v0.2**.
-
-Planned scope:
-1. Diagnose and resolve the OHLCV API_ERROR — see the OHLCV section below before touching anything.
-2. Integrate OHLCV-derived volatility as a scoring dimension at pair level (currently absent in v0.1).
-3. Add a `strategy_type` classification output: `STABLE / BLUECHIP / TACTICAL`.
-4. Extend `validate_watchlist.py` to cover any new columns introduced by v0.2.
-
-**Do not begin v0.2 implementation until OHLCV status is confirmed from a verified
-GitHub Actions artifact** (see OHLCV section below).
+Strategy Classification v0.2 is **done and CI-verified** (artifact `dlmm-run-28375624302`).
+It is implemented as `scripts/classify_strategy.py` (reads `data/pair_watchlist.csv` +
+`data/ohlcv_top_pairs.csv`; writes `data/strategy_classification_v2.csv` +
+`reports/strategy_classification_v2.md`), wired into the workflow after OHLCV and before
+validation, and covered additively by `validate_watchlist.py` +
+`tests/test_classify_strategy.py`. It uses the `strategy_class_v2` enum
+`{CORE, TACTICAL, REJECT, NOT_EVALUATED}`. CI counts:
+**CORE=9, TACTICAL=9, REJECT=2, NOT_EVALUATED=194** (214 pairs). Binding rules: OHLCV
+unavailable → `NOT_EVALUATED` (never REJECT); extreme volatility is not auto-REJECT
+(TACTICAL when metrics acceptable, REJECT only when combined with a severe issue); `TACTICAL`
+is observe-only; `live_eligibility` may never be `LIVE_ELIGIBLE_*`. See
+`docs/decision_log.md` → DEC-20260629-006 and DEC-20260629-007.
 
 ---
 
-## OHLCV Status — Local Artifacts May Be Stale
+## Next Task: Data-Quality Guard for Malformed Pair Labels
 
-**Warning:** Local files `data/ohlcv_top_pairs.csv` and `reports/ohlcv_report.md` may
-reflect a transient failure, not the current API state. A local run showing `API_ERROR`
-for all 20 pairs does not prove the endpoint is permanently unavailable.
+The next planned work unit is a **data-quality guard for malformed pair labels**, starting
+with the **`-USDT`** case.
 
-**Before changing any OHLCV-related logic, verify the latest GitHub Actions artifact:**
+Background: the CI run surfaced a pair labelled `-USDT` whose base token symbol is
+**blank/malformed** (empty symbol on one side of the pair). Such a pair can still be
+fetched, scored, and classified, but a missing/unverified token symbol is a data-quality
+red flag (incomplete or unverified token metadata) and **must not be paper-tested until the
+base token is positively identified and vetted**, regardless of its `strategy_class_v2` or
+score.
+
+Planned scope:
+1. Detect malformed pair labels — start with empty/blank base or quote symbol (e.g.
+   `-USDT`, `USDC-`), and consider other malformed-metadata signals.
+2. Surface the finding explicitly (a data-quality flag/column and/or report section) so
+   affected pairs are visibly quarantined from paper-test consideration.
+3. Decide enforcement point — favour a **new standalone script and/or additive validator
+   check**, consistent with the "do not modify existing scripts without targeted
+   instruction" rule. Do not refactor the working pipeline.
+4. Add corresponding validator coverage and tests for any new column/flag.
+
+Constraints unchanged: this remains research/screening, PAPER_ONLY, no wallet/execution.
+The guard is about **data trustworthiness before paper testing**, not about enabling any
+live action.
+
+---
+
+## OHLCV Status — CI-Confirmed Healthy (2026-06-29)
+
+**Current status:** The OHLCV endpoint, URL format, and `extract_candles()` parser are
+**confirmed working in GitHub Actions**. CI artifact `dlmm-run-28375624302` returned
+**20/20 `OK`** (0 `API_ERROR`, 0 `MALFORMED_RESPONSE`) for the Top-20 representative pools.
+The earlier all-`API_ERROR` local artifact was a **stale/transient failure**, now
+superseded. See `docs/assumption_register.md` → ASM-20260629-006 (status: VALIDATED IN CI).
+
+**Standing rule — CI remains authoritative over local (DEC-20260629-005):** a local run
+showing `API_ERROR` still does **not** prove the endpoint is down. Live market/API
+conditions change run-to-run: pool sets churn, pools can be delisted, and the endpoint can
+have transient outages, so a future run may legitimately show some `API_ERROR` /
+`DATA_NOT_AVAILABLE` rows. That is expected, non-failing behaviour (such pairs become
+`NOT_EVALUATED`, never `REJECT`) and is not by itself an endpoint failure.
+
+**Before changing any OHLCV-related logic, still verify the latest GitHub Actions artifact:**
 
 1. Open GitHub Actions → workflow `Collect and Validate` → latest run.
 2. Download the artifact `dlmm-run-<run_id>`.
 3. Inspect `reports/ohlcv_report.md` from that artifact.
-4. If the artifact also shows all `API_ERROR`, then investigate:
+4. Only treat the endpoint as broken if CI shows **persistent total `API_ERROR` across
+   multiple separate runs on different days**; then investigate:
    - Whether the endpoint URL and query parameters match the current datapi schema.
    - Whether the pool addresses being queried are still active.
    - Whether the response shape differs from what `extract_candles()` expects.
-5. Only after this investigation, modify `fetch_ohlcv_top_pairs.py`.
+5. Only after that investigation, modify `fetch_ohlcv_top_pairs.py`.
 
 **Do not patch OHLCV scripts based only on local artifact state.**
 
-See also: `docs/assumption_register.md` → ASM-20260629-006.
+See also: `docs/decision_log.md` → DEC-20260629-007 (ASM-20260629-006 is referenced above).
 
 ---
 
 ## Working Pipeline — Do Not Rewrite
 
-The four-script pipeline is working and CI-tested. Do not refactor, rename, or
-restructure the existing scripts without explicit instruction.
+The five-step (five-script) pipeline is working and CI-confirmed (GitHub Actions artifact
+`dlmm-run-28375624302`). Do not refactor, rename, or restructure the existing scripts
+without explicit instruction. The CI run order is:
 
-| Script | Role | Modification rule |
-|---|---|---|
-| `scripts/fetch_meteora_pools.py` | Step 1: fetch raw pools | Do not modify |
-| `scripts/build_watchlist.py` | Step 2: map + score + write CSVs | Do not modify |
-| `scripts/fetch_ohlcv_top_pairs.py` | Step 3: OHLCV tool-test | Do not modify until CI verified |
-| `scripts/validate_watchlist.py` | Step 4: gate enforcement | Do not modify without adding tests |
+| Step | Script | Role | Modification rule |
+|---|---|---|---|
+| 1 | `scripts/fetch_meteora_pools.py` | fetch raw pools | Do not modify |
+| 2 | `scripts/build_watchlist.py` | map + score + write CSVs | Do not modify |
+| 3 | `scripts/fetch_ohlcv_top_pairs.py` | OHLCV tool-test | CI-confirmed healthy (artifact `dlmm-run-28375624302`); do not change OHLCV logic casually — CI remains authoritative (see OHLCV Status) |
+| 4 | `scripts/classify_strategy.py` | Strategy Classification v0.2 (pair-level) | CI-wired (after OHLCV, before validation); do not modify without targeted instruction + tests |
+| 5 | `scripts/validate_watchlist.py` | gate enforcement | Do not modify without adding tests |
 
 Permitted: adding new scripts alongside existing ones.
 Forbidden: modifying existing scripts unless explicitly instructed and the change is
@@ -132,7 +181,8 @@ exact string `DATA_NOT_AVAILABLE` — not empty string, not `null`, not `0`, not
 **Currently unavailable from `https://dlmm.datapi.meteora.ag/pools`:**
 - `total_lps` — not in the datapi `/pools` schema
 - `organic_score` — Jupiter concept, not a Meteora datapi field
-- `volatility_pct` — requires OHLCV endpoint (separate, currently failing locally)
+- `volatility_pct` — not in the `/pools` schema; sourced separately via the OHLCV step
+  (CI-confirmed healthy — see OHLCV Status)
 
 Never fabricate a value to fill a column. `DATA_NOT_AVAILABLE` is a factual finding,
 not a workaround to hide.
