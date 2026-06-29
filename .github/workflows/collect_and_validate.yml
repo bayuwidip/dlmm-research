@@ -49,6 +49,14 @@ jobs:
         continue-on-error: true
         run: python scripts/fetch_ohlcv_top_pairs.py
 
+      # Strategy Classification v0.2: transformasi CSV murni (stdlib, tanpa
+      # jaringan). Jika OHLCV API_ERROR, skrip menghasilkan NOT_EVALUATED dan
+      # tetap exit 0 — jadi langkah ini tidak digerbangi pada hasil OHLCV.
+      # TIDAK pakai continue-on-error: kegagalan di sini = bug nyata (mis.
+      # pair_watchlist.csv hilang), bukan masalah jaringan transien.
+      - name: Strategy Classification v0.2
+        run: python scripts/classify_strategy.py
+
       - name: Validate watchlist
         run: python scripts/validate_watchlist.py
 
@@ -62,8 +70,10 @@ jobs:
             data/pools_watchlist.csv
             data/pair_watchlist.csv
             data/ohlcv_top_pairs.csv
+            data/strategy_classification_v2.csv
             reports/latest_pool_report.md
             reports/ohlcv_report.md
+            reports/strategy_classification_v2.md
             logs/*.log
           if-no-files-found: warn
           retention-days: 14
