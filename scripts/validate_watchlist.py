@@ -486,8 +486,177 @@ def validate_ohlcv_csv():
     return 0
 
 
+STRATEGY_V2_CSV_PATH = (Path(__file__).resolve().parent.parent / "data"
+                        / "strategy_classification_v2.csv")
+
+STRATEGY_V2_REQUIRED = [
+    "pair_label", "pair_key", "representative_pool_address",
+    "ohlcv_status", "ohlcv_volatility_bucket", "pair_score_total_v1",
+    "strategy_class_v2", "pair_score_v2_core", "pair_score_v2_tactical",
+    "pair_status_v2", "risk_flag_count", "risk_flags", "test_lane",
+    "live_eligibility", "minimum_observation_days", "required_capability",
+    "v2_classification_reason",
+]
+STRATEGY_V2_ALLOWED = {
+    "strategy_class_v2": {"CORE", "TACTICAL", "REJECT", "NOT_EVALUATED"},
+    "test_lane": {"CLEAN", "RISKY_BUT_INTERESTING", "QUARANTINE", "NOT_EVALUATED"},
+    "live_eligibility": {"NOT_EVALUATED", "OBSERVE_ONLY", "PAPER_TEST_ALLOWED",
+                         "NOT_LIVE_ELIGIBLE"},
+    "required_capability": {"NONE", "OBSERVE", "PAPER_SIM"},
+    "pair_status_v2": {"REJECT", "WATCHLIST", "PAPER TEST", "NOT_EVALUATED"},
+}
+# Fase PAPER_ONLY: nilai ini DILARANG muncul di kolom live_eligibility.
+STRATEGY_V2_FORBIDDEN_LIVE = ("LIVE_ELIGIBLE_TINY_SIZE", "LIVE_ELIGIBLE_LIMITED",
+                              "LIVE_ELIGIBLE_FULL")
+# Capability yang dilarang sama sekali di fase ini (tidak ada eksekusi/wallet).
+STRATEGY_V2_FORBIDDEN_CAP = ("WALLET", "EXECUTE", "SWAP", "LP", "REBALANCE", "SIGN")
+# Flag berat yang membenarkan REJECT (REJECT tak boleh tanpa alasan berat).
+STRATEGY_V2_SEVERE_FLAGS = {"BLACKLISTED", "NO_ELIGIBLE_FEE_POOL", "LOW_LIQUIDITY",
+                            "LOW_VOLUME", "DATA_QUALITY_NA", "LOW_DATA_COMPLETENESS"}
+STRATEGY_V2_NUM_OR_NA = ["pair_score_total_v1", "pair_score_v2_core",
+                         "pair_score_v2_tactical"]
+# Tidak boleh ada kolom wallet/execution/live di output v0.2.
+STRATEGY_V2_FORBIDDEN_COLS = ("wallet", "private_key", "signature", "execute",
+                              "swap", "live")
+
+
+def validate_strategy_v2_csv():
+    """Validasi struktur + gate strategy_classification_v2.csv. Exit code 0/1."""
+    print("\n" + "=" * 60)
+    print("  STRATEGY CLASSIFICATION v0.2 VALIDATION")
+    print("=" * 60)
+    if not STRATEGY_V2_CSV_PATH.exists():
+        print(f"  CATATAN: {STRATEGY_V2_CSV_PATH.name} belum ada "
+              f"(jalankan classify_strategy.py).")
+        print("  Dilewati — bukan error jika belum dijalankan.")
+        return 0
+
+    errors = []
+    with STRATEGY_V2_CSV_PATH.open(newline="", encoding="utf-8") as f:
+        rows = list(csv.reader(f))
+    if not rows:
+        print("  FATAL: strategy v2 CSV kosong.")
+        return 1
+    header = rows[0]
+    data_rows = rows[1:]
+    ncols = len(header)
+
+    missing = [c for c in STRATEGY_V2_REQUIRED if c not in header]
+    if missing:
+        print(f"  GAGAL: kolom wajib hilang: {missing}")
+        return 1
+
+    # kolom terlarang (wallet/execution/live) tidak boleh ada
+    for col in header:
+        for bad in STRATEGY_V2_FORBIDDEN_COLS:
+            # 'live_eligibility' sah; hanya tandai jika 'live' berdiri sebagai
+            # bagian nama kolom data on-chain (bukan substring eligibility).
+            if bad == "live" and col == "live_eligibility":
+                continue
+            if bad in col.lower():
+                errors.append(f"kolom terlarang terdeteksi: '{col}' (mengandung '{bad}')")
+
+    idx = {name: header.index(name) for name in header}
+    for i, row in enumerate(data_rows, start=2):
+        if len(row) != ncols:
+            errors.append(f"baris {i}: jumlah kolom {len(row)} != header {ncols}")
+            continue
+
+        def get(col):
+            return row[idx[col]].strip()
+
+        # 1) enum sah
+        for col, allowed in STRATEGY_V2_ALLOWED.items():
+            v = get(col)
+            if v not in allowed:
+                errors.append(f"baris {i}: {col}='{v}' tidak valid "
+                              f"(boleh: {sorted(allowed)})")
+
+        # 2) live_eligibility tidak boleh LIVE_ELIGIBLE_* (pengaman fase)
+        le = get("live_eligibility")
+        if le in STRATEGY_V2_FORBIDDEN_LIVE:
+            errors.append(f"baris {i}: live_eligibility='{le}' DILARANG di fase ini")
+
+        # 3) pair_status_v2 tidak boleh mengandung LIVE
+        if "LIVE" in get("pair_status_v2").upper():
+            errors.append(f"baris {i}: pair_status_v2 '{get('pair_status_v2')}' "
+                          f"mengandung LIVE (dilarang)")
+
+        # 4) required_capability tidak boleh kemampuan eksekusi/wallet
+        cap = get("required_capability").upper()
+        if any(tok in cap for tok in STRATEGY_V2_FORBIDDEN_CAP):
+            errors.append(f"baris {i}: required_capability='{cap}' mengandung "
+                          f"kemampuan terlarang")
+
+        # 5) skor numerik atau NA
+        for c in STRATEGY_V2_NUM_OR_NA:
+            v = get(c)
+            if not is_blank_or_na(v) and not is_number(v):
+                errors.append(f"baris {i}: {c}='{v}' harus numerik atau DATA_NOT_AVAILABLE")
+
+        # 6) minimum_observation_days: integer atau NA
+        mod = get("minimum_observation_days")
+        if not is_blank_or_na(mod):
+            if not is_number(mod) or float(mod) != int(float(mod)):
+                errors.append(f"baris {i}: minimum_observation_days='{mod}' "
+                              f"harus integer atau DATA_NOT_AVAILABLE")
+
+        # 7) risk_flag_count integer & cocok dengan jumlah token risk_flags
+        rfc = get("risk_flag_count")
+        flags_str = get("risk_flags")
+        if not is_number(rfc) or float(rfc) != int(float(rfc)):
+            errors.append(f"baris {i}: risk_flag_count='{rfc}' harus integer")
+        else:
+            n_tokens = 0 if flags_str in ("none", NA, "") else len(
+                [t for t in flags_str.split("|") if t])
+            if int(float(rfc)) != n_tokens:
+                errors.append(f"baris {i}: risk_flag_count={rfc} != jumlah token "
+                              f"risk_flags ({n_tokens})")
+
+        cls = get("strategy_class_v2")
+
+        # 8) NOT_EVALUATED harus konsisten (skor NA, lane/eligibility NOT_EVALUATED)
+        if cls == "NOT_EVALUATED":
+            if get("pair_score_v2_core") != NA or get("pair_score_v2_tactical") != NA:
+                errors.append(f"baris {i}: NOT_EVALUATED tapi skor v2 bukan "
+                              f"DATA_NOT_AVAILABLE")
+            if get("test_lane") != "NOT_EVALUATED":
+                errors.append(f"baris {i}: NOT_EVALUATED tapi test_lane="
+                              f"'{get('test_lane')}'")
+            if le != "NOT_EVALUATED":
+                errors.append(f"baris {i}: NOT_EVALUATED tapi live_eligibility='{le}'")
+
+        # 9) REJECT harus punya >=1 flag berat (REJECT tak boleh tanpa alasan berat)
+        if cls == "REJECT":
+            tokens = set(t for t in flags_str.split("|") if t)
+            if not (tokens & STRATEGY_V2_SEVERE_FLAGS):
+                errors.append(f"baris {i}: strategy_class_v2=REJECT tetapi tidak ada "
+                              f"flag berat di risk_flags='{flags_str}'")
+            if get("test_lane") != "QUARANTINE":
+                errors.append(f"baris {i}: REJECT tapi test_lane bukan QUARANTINE")
+
+        # 10) TACTICAL = reporting/watchlist only -> tidak boleh PAPER_TEST_ALLOWED
+        if cls == "TACTICAL" and le == "PAPER_TEST_ALLOWED":
+            errors.append(f"baris {i}: TACTICAL tidak boleh PAPER_TEST_ALLOWED "
+                          f"(reporting/watchlist saja)")
+
+    print(f"  File  : {STRATEGY_V2_CSV_PATH.name}")
+    print(f"  Baris : {len(data_rows)}")
+    print("-" * 60)
+    if errors:
+        print(f"  GAGAL — {len(errors)} error:")
+        for e in errors[:20]:
+            print(f"    x {e}")
+        print("  HASIL: TIDAK VALID")
+        return 1
+    print("  Semua pemeriksaan strategy v0.2 lolos.")
+    print("  HASIL: VALID")
+    return 0
+
+
 if __name__ == "__main__":
     rc_pool = validate()
     rc_pair = validate_pair_csv()
     rc_ohlcv = validate_ohlcv_csv()
-    sys.exit(rc_pool or rc_pair or rc_ohlcv)
+    rc_strat = validate_strategy_v2_csv()
+    sys.exit(rc_pool or rc_pair or rc_ohlcv or rc_strat)
