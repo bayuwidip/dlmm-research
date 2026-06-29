@@ -398,9 +398,9 @@ def write_report(rows):
     lines.append("")
     lines.append("## Classified pairs")
     lines.append("")
-    lines.append("> CORE/TACTICAL/REJECT only appear when OHLCV is OK. While the "
-                 "OHLCV endpoint returns API_ERROR for all pairs, every row is "
-                 "NOT_EVALUATED by design — this is the honest outcome, not a bug.")
+    lines.append("> CORE/TACTICAL/REJECT only appear when OHLCV is OK. Rows with "
+                 "unavailable OHLCV are classified as NOT_EVALUATED by design. This "
+                 "is the honest outcome, not a bug.")
     lines.append("")
     lines.append("| Pair | OHLCV | Vol bucket | Class | Status v2 | Core | Tactical "
                  "| Lane | Live elig | Min obs days | Capability | Risk flags |")

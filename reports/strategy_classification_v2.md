@@ -1,6 +1,6 @@
 # Strategy Classification v0.2 Report
 
-- Run timestamp (UTC): 2026-06-29T13:48:18.966018+00:00
+- Run timestamp (UTC): 2026-06-29T13:55:45.639545+00:00
 - Total pairs classified: 213
 - Phase: READ_ONLY · RESEARCH_ONLY · SCREENING_ONLY · PAPER_ONLY
 
@@ -25,7 +25,7 @@
 
 ## Classified pairs
 
-> CORE/TACTICAL/REJECT only appear when OHLCV is OK. While the OHLCV endpoint returns API_ERROR for all pairs, every row is NOT_EVALUATED by design — this is the honest outcome, not a bug.
+> CORE/TACTICAL/REJECT only appear when OHLCV is OK. Rows with unavailable OHLCV are classified as NOT_EVALUATED by design. This is the honest outcome, not a bug.
 
 | Pair | OHLCV | Vol bucket | Class | Status v2 | Core | Tactical | Lane | Live elig | Min obs days | Capability | Risk flags |
 |---|---|---|---|---|---:|---:|---|---|---:|---|---|
