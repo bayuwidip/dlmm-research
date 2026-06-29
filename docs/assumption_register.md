@@ -154,9 +154,28 @@ This is a future concern — no Telegram code is written in the current phase.
 ## ASM-20260629-006 — Local OHLCV API_ERROR Artifacts May Be Stale
 
 **Date:** 2026-06-29
+**Status:** **VALIDATED LOCALLY (2026-06-29) — not closed; pending GitHub Actions
+artifact confirmation.**
 **Assumption:** The local `data/ohlcv_top_pairs.csv` and `reports/ohlcv_report.md`
 showing `API_ERROR` for all 20 top pairs reflect a **transient or environment-specific
 failure**, not a permanent unavailability of the OHLCV endpoint.
+
+**Review note (2026-06-29):** A local diagnostic re-run of
+`scripts/fetch_ohlcv_top_pairs.py` returned **20/20 `OK`** against the unchanged endpoint
+URL, the same representative pool addresses, and the existing `extract_candles()` parser.
+The raw snapshot `data/raw/ohlcv_top_pairs_raw_latest.json` grew from 192 bytes
+(`"raw_by_pool": {}`) to ~436 KB containing 20 pools, each with a `data` array of ~31–73
+hourly candles matching the documented `{start_time, end_time, timeframe, data:[...]}`
+shape. This **confirms the earlier all-`API_ERROR` artifact was a stale/transient failure
+artifact** — the local OHLCV endpoint, URL format, and parser are **healthy as of this
+diagnostic run**. Downstream, Strategy Classification v0.2 then produced real
+`CORE=8 / TACTICAL=10 / REJECT=2 / NOT_EVALUATED=193` (see DEC-20260629-006).
+
+**However, this assumption is NOT fully closed.** A single local run validates only the
+local environment. The **latest GitHub Actions artifact must still confirm CI-environment
+behavior** before OHLCV availability is treated as settled and before `validation_gate`
+or `CLAUDE.md` OHLCV status is changed. Per DEC-20260629-005, CI — not local — is the
+authoritative source.
 
 **Basis:** The endpoint URL pattern (`/pools/{address}/ohlcv?timeframe=...&start_time=...
 &end_time=...`) is consistent with the documented datapi schema. The raw snapshot file

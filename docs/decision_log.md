@@ -130,5 +130,59 @@ of working pipeline code — the wrong fix for the wrong diagnosis.
 
 ---
 
+## DEC-20260629-006 — Strategy Classification v0.2 Accepted as Local Pipeline Layer
+
+**Date:** 2026-06-29
+**Decision:** Strategy Classification v0.2 is accepted as a **local pipeline layer** built
+on top of the pair-level view. It is implemented as a standalone script
+(`scripts/classify_strategy.py`) that reads `data/pair_watchlist.csv` and
+`data/ohlcv_top_pairs.csv` and writes `data/strategy_classification_v2.csv` plus
+`reports/strategy_classification_v2.md`. It introduces the `strategy_class_v2` enum
+`{CORE, TACTICAL, REJECT, NOT_EVALUATED}` with companion columns
+(`pair_score_v2_core`, `pair_score_v2_tactical`, `pair_status_v2`, `risk_flag_count`,
+`risk_flags`, `test_lane`, `live_eligibility`, `minimum_observation_days`,
+`required_capability`, `v2_classification_reason`). Acceptance is at the **local layer
+only** — it is not yet verified by a GitHub Actions artifact, and GitHub Actions is
+deliberately not updated in this step.
+
+**Rationale:** v0.2 extends, rather than replaces, the v0.1 pair-level scoring
+(DEC-20260629-001). It encodes four binding rules drawn from the project's current phase:
+1. **OHLCV unavailable → `NOT_EVALUATED`, never `REJECT`.** Missing volatility data is a
+   gap, not a verdict — consistent with the no-guess principle and DEC-20260629-005.
+2. **Extreme volatility is not an automatic `REJECT`.** A volatile pair becomes `TACTICAL`
+   when liquidity, volume, fee quality, and data quality are acceptable; it is `REJECT`
+   only when extreme/high volatility is *combined* with a severe issue (blacklist, no
+   eligible fee pool, unacceptable liquidity/volume, or severe data issue such as
+   `data_completeness_pct` below the floor). This realises ASM-20260629-003.
+3. **`TACTICAL` is reporting/watchlist only.** It maps to `pair_status_v2 = WATCHLIST`,
+   `live_eligibility = OBSERVE_ONLY`, `required_capability = OBSERVE`. No paper entry,
+   no execution, no LP, no rebalance, no wallet pathway is implied or permitted.
+4. **No live eligibility in this phase.** `live_eligibility` can never take any
+   `LIVE_ELIGIBLE_*` value; this is enforced in the classifier and re-checked by the
+   validator. PAPER_ONLY is preserved end-to-end (validation_gate remains red).
+
+A successful local OHLCV diagnostic run on 2026-06-29 (20/20 `OK`, see ASM-20260629-006)
+exercised the classifier on real volatility data, producing:
+`CORE = 8`, `TACTICAL = 10`, `REJECT = 2`, `NOT_EVALUATED = 193`. The two `REJECT` rows
+were extreme volatility *combined with* `LOW_DATA_COMPLETENESS` — confirming rule 2 fires
+on combination, not on volatility alone.
+
+**Impact:**
+- `validate_watchlist.py` was extended **additively** with `validate_strategy_v2_csv()`
+  (enum checks; `live_eligibility` may never be `LIVE_ELIGIBLE_*`; `pair_status_v2` may not
+  contain `LIVE`; `required_capability` may not be an execution/wallet capability; `REJECT`
+  must carry at least one severe flag; forbidden-column scan). Unit tests
+  (`tests/test_classify_strategy.py`) cover the CORE/TACTICAL/REJECT/NOT_EVALUATED branches
+  and the no-LIVE guarantee, stdlib-only.
+- The four working scripts (`fetch_meteora_pools.py`, `build_watchlist.py`,
+  `fetch_ohlcv_top_pairs.py`, and the existing body of `validate_watchlist.py`) were not
+  refactored. Pool-level scoring remains legacy audit trail only (DEC-20260629-001).
+- Acceptance is **local-only**. Promotion of these CORE/TACTICAL/REJECT results to
+  authoritative status, and any GitHub Actions wiring, is gated on CI artifact
+  confirmation (DEC-20260629-005, ASM-20260629-006).
+- No wallet, execution, LP, rebalance, swap, or private-key logic exists or is introduced.
+
+---
+
 *This log is append-only. Do not edit or delete past entries.*
 *New decisions are added at the bottom.*
