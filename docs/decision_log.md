@@ -241,5 +241,62 @@ classifier, and the validator are therefore all confirmed functional in GitHub A
 
 ---
 
+## DEC-20260629-008 — Malformed Pair Label Guard CI-Confirmed
+
+**Date:** 2026-06-29
+**Decision:** The data-quality guard for malformed pair labels (risk flag
+`MALFORMED_PAIR_LABEL`, added to `scripts/classify_strategy.py` and enforced in
+`scripts/validate_watchlist.py`) is confirmed working in the CI environment. GitHub Actions
+artifact **`dlmm-run-28377415742`** ran the full pipeline and produced a
+`strategy_classification_v2.csv` in which the only malformed-label pair, **`-USDT`**, is
+correctly routed away from paper-test eligibility. A pair label is treated as malformed
+when splitting on `-` yields any empty segment (e.g. `-USDT`, `USDC-`, `USDC--SOL`, `""`),
+which signals a blank/missing token symbol — i.e. incomplete token identity.
+
+**Rationale:** `-USDT` previously scored CORE / `PAPER_TEST_ALLOWED` despite one side of
+the pair having a blank token symbol (incomplete identity). A pair whose token cannot be
+positively identified must not be a paper-test candidate. The guard makes
+`MALFORMED_PAIR_LABEL` a **severe** flag so it routes through the existing REJECT gate; the
+validator independently fails any malformed-label row that is marked CORE / PAPER TEST /
+`PAPER_TEST_ALLOWED`. CI confirmation (per DEC-20260629-005) closes the manual data-quality
+follow-up recorded in DEC-20260629-007.
+
+**CI results (artifact `dlmm-run-28377415742`):**
+- Total pairs: **212**.
+- `strategy_class_v2` counts: **CORE = 9, TACTICAL = 8, REJECT = 2, NOT_EVALUATED = 193**.
+- OHLCV statuses: **OK = 19, API_ERROR = 1, DATA_NOT_AVAILABLE = 192** (mixed statuses —
+  the pipeline now demonstrably handles partial OHLCV availability, not all-or-nothing).
+- Malformed-label rows: **1**. Paper-testable malformed rows: **0**.
+- The malformed pair **`-USDT`**: `ohlcv_status=OK`, `ohlcv_volatility_bucket=MODERATE`,
+  `strategy_class_v2=REJECT`, `pair_status_v2=REJECT`, `test_lane=QUARANTINE`,
+  `live_eligibility=NOT_LIVE_ELIGIBLE`, `required_capability=NONE`,
+  `risk_flags=MALFORMED_PAIR_LABEL`.
+- Report wording was also corrected: it no longer claims "API_ERROR for all pairs" and now
+  uses neutral wording for unavailable OHLCV (rows with unavailable OHLCV → `NOT_EVALUATED`
+  by design).
+
+**Binding rule:** A malformed-label row must **never** be paper-testable — it must not be
+`CORE`, `PAPER TEST`, or `PAPER_TEST_ALLOWED`. Valid outcomes are
+`REJECT / QUARANTINE / NOT_LIVE_ELIGIBLE` when OHLCV is available, or `NOT_EVALUATED` when
+OHLCV is unavailable (the flag is still surfaced for visibility). This may be relaxed for a
+specific pair **only** when the missing/blank token identity is positively identified and
+the guard is intentionally and explicitly revised — not by ad-hoc override.
+
+**Scope limits (what this decision does NOT assert):**
+- This confirms **data-quality guard behaviour only**. It is not a claim of profitability
+  and does **not** advance live readiness.
+- Live execution remains **forbidden**. `validation_gate` stays **red**;
+  `max_allowed_action` stays **PAPER_ONLY**.
+- `TACTICAL` remains observe-only; `PAPER_TEST_ALLOWED` means paper-only, never live.
+
+**Impact:**
+- The DEC-20260629-007 data-quality follow-up for `-USDT` is now resolved by an enforced,
+  CI-verified guard rather than a manual review note.
+- ASM-20260629-007 (blank/malformed pair labels may appear in Meteora metadata) is recorded
+  as **VALIDATED IN CI** with this artifact as evidence.
+- No phase gate changes; all PAPER_ONLY / no-live-execution constraints remain in force.
+
+---
+
 *This log is append-only. Do not edit or delete past entries.*
 *New decisions are added at the bottom.*

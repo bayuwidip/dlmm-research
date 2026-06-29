@@ -224,5 +224,40 @@ See also: DEC-20260629-005 (local artifacts must not override CI results).
 
 ---
 
+## ASM-20260629-007 — Blank or Malformed Pair Labels May Appear in Meteora Metadata
+
+**Date:** 2026-06-29
+**Status:** **VALIDATED IN CI (2026-06-29) — artifact `dlmm-run-28377415742`,
+`-USDT` case.**
+**Assumption:** Meteora datapi pool/token metadata can contain tokens whose `symbol` is
+blank/empty (not merely missing), which propagates into the derived `pair_label` as a
+malformed value with an empty segment (e.g. `-USDT`, `USDC-`, `USDC--SOL`). Such a label
+signals **incomplete token identity** and the pair must not be treated as a paper-test
+candidate until the token is positively identified and vetted.
+
+**Basis:** CI artifact `dlmm-run-28377415742` (212 pairs) contained exactly one malformed
+label, **`-USDT`** — its base token symbol was blank in the snapshot. The pair otherwise
+had `ohlcv_status=OK` and `ohlcv_volatility_bucket=MODERATE` and would, absent the guard,
+have scored CORE / `PAPER_TEST_ALLOWED`. This confirms the failure mode is real and reachable
+in the live API, not hypothetical.
+
+**Risk if wrong (i.e. if such labels were ignored):** A pair with an unidentifiable token
+could enter paper-test consideration purely on liquidity/volume/volatility metrics, masking
+a token-identity / metadata-trust problem (possible unverified, spoofed, or malformed token).
+
+**Review trigger:** Any CI run where the count of `MALFORMED_PAIR_LABEL` rows rises, or where
+a malformed-label row appears as `CORE` / `PAPER TEST` / `PAPER_TEST_ALLOWED` (the validator
+should fail first). Also review if Meteora changes how token symbols are populated.
+
+**Mitigation plan (in force):** `scripts/classify_strategy.py` detects malformed labels and
+emits the **severe** flag `MALFORMED_PAIR_LABEL`, routing such pairs to
+`REJECT / QUARANTINE / NOT_LIVE_ELIGIBLE` when OHLCV is available (or `NOT_EVALUATED` with
+the flag surfaced when OHLCV is unavailable). `scripts/validate_watchlist.py` independently
+fails any malformed-label row that is marked paper-testable. The guard blocks paper-test
+eligibility unless the token identity is positively identified and the guard is intentionally
+revised. See DEC-20260629-008.
+
+---
+
 *Assumptions are reviewed at each weekly journal entry (`journals/weekly_review_template.md`).*
 *A violated assumption requires a decision log entry before any code change is made.*
