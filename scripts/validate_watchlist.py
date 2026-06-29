@@ -512,7 +512,19 @@ STRATEGY_V2_FORBIDDEN_LIVE = ("LIVE_ELIGIBLE_TINY_SIZE", "LIVE_ELIGIBLE_LIMITED"
 STRATEGY_V2_FORBIDDEN_CAP = ("WALLET", "EXECUTE", "SWAP", "LP", "REBALANCE", "SIGN")
 # Flag berat yang membenarkan REJECT (REJECT tak boleh tanpa alasan berat).
 STRATEGY_V2_SEVERE_FLAGS = {"BLACKLISTED", "NO_ELIGIBLE_FEE_POOL", "LOW_LIQUIDITY",
-                            "LOW_VOLUME", "DATA_QUALITY_NA", "LOW_DATA_COMPLETENESS"}
+                            "LOW_VOLUME", "DATA_QUALITY_NA", "LOW_DATA_COMPLETENESS",
+                            "MALFORMED_PAIR_LABEL"}
+
+
+def is_malformed_pair_label(pair_label):
+    """Cacat jika pisah pada '-' menghasilkan segmen kosong (mis. '-USDT',
+    'USDC-', 'USDC--SOL', ''). 'X-Y-USDC' (semua non-kosong) tidak cacat."""
+    if pair_label is None:
+        return True
+    s = pair_label.strip()
+    if s == "" or s == NA:
+        return True
+    return any(seg.strip() == "" for seg in s.split("-"))
 STRATEGY_V2_NUM_OR_NA = ["pair_score_total_v1", "pair_score_v2_core",
                          "pair_score_v2_tactical"]
 # Tidak boleh ada kolom wallet/execution/live di output v0.2.
@@ -639,6 +651,37 @@ def validate_strategy_v2_csv():
         if cls == "TACTICAL" and le == "PAPER_TEST_ALLOWED":
             errors.append(f"baris {i}: TACTICAL tidak boleh PAPER_TEST_ALLOWED "
                           f"(reporting/watchlist saja)")
+
+        tokens = set(t for t in flags_str.split("|") if t)
+
+        # 11) Guard label cacat: pasangan dengan pair_label malformed tidak boleh
+        #     CORE / PAPER TEST / PAPER_TEST_ALLOWED. Hasil sah: REJECT/QUARANTINE/
+        #     NOT_LIVE_ELIGIBLE (OHLCV ada) ATAU NOT_EVALUATED (OHLCV tak ada).
+        if is_malformed_pair_label(get("pair_label")):
+            if "MALFORMED_PAIR_LABEL" not in tokens:
+                errors.append(f"baris {i}: pair_label '{get('pair_label')}' cacat "
+                              f"tetapi MALFORMED_PAIR_LABEL tidak ada di risk_flags")
+            if cls == "CORE":
+                errors.append(f"baris {i}: pair_label cacat tetapi strategy_class_v2="
+                              f"CORE (harus REJECT atau NOT_EVALUATED)")
+            if get("pair_status_v2") == "PAPER TEST":
+                errors.append(f"baris {i}: pair_label cacat tetapi pair_status_v2="
+                              f"PAPER TEST (dilarang)")
+            if le == "PAPER_TEST_ALLOWED":
+                errors.append(f"baris {i}: pair_label cacat tetapi live_eligibility="
+                              f"PAPER_TEST_ALLOWED (dilarang)")
+            if cls not in ("REJECT", "NOT_EVALUATED"):
+                errors.append(f"baris {i}: pair_label cacat -> strategy_class_v2 harus "
+                              f"REJECT (OHLCV ada) atau NOT_EVALUATED (OHLCV tak ada), "
+                              f"bukan '{cls}'")
+
+        # 12) Konsistensi MALFORMED_PAIR_LABEL: jika flag ada, live_eligibility
+        #     wajib NOT_LIVE_ELIGIBLE atau NOT_EVALUATED.
+        if "MALFORMED_PAIR_LABEL" in tokens:
+            if le not in ("NOT_LIVE_ELIGIBLE", "NOT_EVALUATED"):
+                errors.append(f"baris {i}: risk_flags mengandung MALFORMED_PAIR_LABEL "
+                              f"tetapi live_eligibility='{le}' (wajib NOT_LIVE_ELIGIBLE "
+                              f"atau NOT_EVALUATED)")
 
     print(f"  File  : {STRATEGY_V2_CSV_PATH.name}")
     print(f"  Baris : {len(data_rows)}")

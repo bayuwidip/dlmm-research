@@ -146,5 +146,111 @@ class TestClassify(unittest.TestCase):
         self.assertEqual(out["risk_flag_count"], len(tokens))
 
 
+class TestMalformedLabelGuard(unittest.TestCase):
+    """Data-Quality Guard untuk label pasangan cacat (mis. '-USDT')."""
+
+    def _assert_quarantined(self, out):
+        self.assertEqual(out["strategy_class_v2"], "REJECT")
+        self.assertEqual(out["pair_status_v2"], "REJECT")
+        self.assertEqual(out["test_lane"], "QUARANTINE")
+        self.assertEqual(out["live_eligibility"], "NOT_LIVE_ELIGIBLE")
+        self.assertEqual(out["required_capability"], "NONE")
+        self.assertIn("MALFORMED_PAIR_LABEL", out["risk_flags"])
+
+    def test_leading_blank_dash_usdt_ohlcv_ok(self):
+        # OHLCV OK + metrik baik, tapi label '-USDT' cacat -> REJECT/QUARANTINE.
+        out = cs.classify(good_pair(pair_label="-USDT"), lookup_with("LOW"))
+        self._assert_quarantined(out)
+        # skor tetap numerik (dihitung sebelum gate REJECT).
+        self.assertNotEqual(out["pair_score_v2_core"], NA)
+        self.assertNotEqual(out["pair_score_v2_tactical"], NA)
+
+    def test_trailing_blank_usdc_dash_ohlcv_ok(self):
+        out = cs.classify(good_pair(pair_label="USDC-"), lookup_with("LOW"))
+        self._assert_quarantined(out)
+
+    def test_empty_label_ohlcv_ok(self):
+        out = cs.classify(good_pair(pair_label=""), lookup_with("LOW"))
+        self._assert_quarantined(out)
+
+    def test_double_dash_label_ohlcv_ok(self):
+        out = cs.classify(good_pair(pair_label="USDC--SOL"), lookup_with("LOW"))
+        self._assert_quarantined(out)
+
+    def test_malformed_label_no_ohlcv_stays_not_evaluated_with_flag(self):
+        # Precedence NOT_EVALUATED dipertahankan, flag tetap muncul.
+        out = cs.classify(good_pair(pair_label="-USDT"), {})  # lookup kosong
+        self.assertEqual(out["strategy_class_v2"], "NOT_EVALUATED")
+        self.assertEqual(out["live_eligibility"], "NOT_EVALUATED")
+        self.assertIn("MALFORMED_PAIR_LABEL", out["risk_flags"])
+
+    def test_normal_label_unaffected(self):
+        out = cs.classify(good_pair(pair_label="USDC-SOL"), lookup_with("LOW"))
+        self.assertEqual(out["strategy_class_v2"], "CORE")
+        self.assertEqual(out["live_eligibility"], "PAPER_TEST_ALLOWED")
+        self.assertNotIn("MALFORMED_PAIR_LABEL", out["risk_flags"])
+
+    def test_multi_hyphen_nonempty_not_flagged(self):
+        out = cs.classify(good_pair(pair_label="X-Y-USDC"), lookup_with("LOW"))
+        self.assertNotIn("MALFORMED_PAIR_LABEL", out["risk_flags"])
+        self.assertEqual(out["strategy_class_v2"], "CORE")
+
+    def test_risk_flag_count_includes_malformed(self):
+        out = cs.classify(good_pair(pair_label="-USDT"), lookup_with("LOW"))
+        tokens = [t for t in out["risk_flags"].split("|") if t]
+        self.assertIn("MALFORMED_PAIR_LABEL", tokens)
+        self.assertEqual(out["risk_flag_count"], len(tokens))
+
+    def test_detector_helper(self):
+        for bad in ("-USDT", "USDC-", "USDC--SOL", "", "   ", None, NA):
+            self.assertTrue(cs.is_malformed_label(bad), f"{bad!r} should be malformed")
+        for ok in ("USDC-SOL", "X-Y-USDC", "FOO-BAR"):
+            self.assertFalse(cs.is_malformed_label(ok), f"{ok!r} should be clean")
+
+
+class TestValidatorMalformedGuard(unittest.TestCase):
+    """Validator harus menolak baris label-cacat yang ditandai paper-testable."""
+
+    def setUp(self):
+        import validate_watchlist as vw  # noqa: E402
+        self.vw = vw
+
+    def _run_validator_on(self, rows):
+        import csv as _csv
+        import os
+        import tempfile
+        fd, path = tempfile.mkstemp(suffix=".csv")
+        os.close(fd)
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = _csv.DictWriter(f, fieldnames=cs.OUT_HEADER)
+            w.writeheader()
+            for r in rows:
+                w.writerow({k: r.get(k, NA) for k in cs.OUT_HEADER})
+        old = self.vw.STRATEGY_V2_CSV_PATH
+        try:
+            self.vw.STRATEGY_V2_CSV_PATH = Path(path)
+            return self.vw.validate_strategy_v2_csv()
+        finally:
+            self.vw.STRATEGY_V2_CSV_PATH = old
+            os.remove(path)
+
+    def test_valid_malformed_reject_row_passes(self):
+        row = cs.classify(good_pair(pair_label="-USDT"), lookup_with("LOW"))
+        self.assertEqual(self._run_validator_on([row]), 0)
+
+    def test_malformed_row_marked_paper_test_allowed_fails(self):
+        row = cs.classify(good_pair(pair_label="-USDT"), lookup_with("LOW"))
+        # Sabotase: paksa jadi paper-testable walau label cacat.
+        row = dict(row)
+        row.update({
+            "strategy_class_v2": "CORE",
+            "pair_status_v2": "PAPER TEST",
+            "test_lane": "CLEAN",
+            "live_eligibility": "PAPER_TEST_ALLOWED",
+            "required_capability": "PAPER_SIM",
+        })
+        self.assertEqual(self._run_validator_on([row]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

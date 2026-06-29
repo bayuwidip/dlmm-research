@@ -70,7 +70,7 @@ VOL_SCORE_TACTICAL = {"LOW": 30.0, "MODERATE": 60.0, "HIGH": 90.0, "EXTREME": 10
 # Flag risiko yang dianggap "berat" -> memicu REJECT (gabungan, bukan volatilitas saja).
 SEVERE_FLAGS = frozenset({
     "BLACKLISTED", "NO_ELIGIBLE_FEE_POOL", "LOW_LIQUIDITY", "LOW_VOLUME",
-    "DATA_QUALITY_NA", "LOW_DATA_COMPLETENESS",
+    "DATA_QUALITY_NA", "LOW_DATA_COMPLETENESS", "MALFORMED_PAIR_LABEL",
 })
 
 OUT_HEADER = [
@@ -103,6 +103,22 @@ def fnum(value):
         return float(s)
     except (TypeError, ValueError):
         return None
+
+
+def is_malformed_label(pair_label):
+    """
+    True jika pair_label cacat: pisah pada '-' menghasilkan segmen kosong.
+    Contoh cacat: '-USDT', 'USDC-', 'USDC--SOL', '' (satu sisi simbol token
+    kosong/hilang -> identitas token tidak lengkap).
+    TIDAK menandai label multi-hyphen yang semua segmennya non-kosong, mis.
+    'X-Y-USDC'. NA/None diperlakukan sebagai cacat (tak ada label dapat dipakai).
+    """
+    if pair_label is None:
+        return True
+    s = str(pair_label).strip()
+    if s == "" or s == NA:
+        return True
+    return any(seg.strip() == "" for seg in s.split("-"))
 
 
 def pick_representative_address(prow):
@@ -140,6 +156,11 @@ def compute_risk_flags(prow, orow):
     orow boleh None (OHLCV tidak tersedia). Mengembalikan list flag (urut stabil).
     """
     flags = []
+
+    # --- Kualitas data: label pasangan cacat (identitas token tak lengkap) ---
+    # Selalu dicek, terlepas dari status OHLCV, agar tampak di risk_flags.
+    if is_malformed_label(prow.get("pair_label")):
+        flags.append("MALFORMED_PAIR_LABEL")
 
     # --- Struktural, dari pair_watchlist (selalu bisa dihitung) ---
     blacklisted = fnum(prow.get("blacklisted_pool_count"))
@@ -257,6 +278,10 @@ def classify(prow, ohlcv_lookup):
         reason = (f"OHLCV tidak tersedia (status={ohlcv_status}, "
                   f"bucket={vol_bucket}); volatilitas tak terukur -> NOT_EVALUATED. "
                   f"Bukan REJECT.")
+        if "MALFORMED_PAIR_LABEL" in flags:
+            reason += (" CATATAN data-quality: label pasangan cacat / identitas "
+                       "token tidak lengkap — tidak boleh dipaper-test sampai token "
+                       "diidentifikasi dan diverifikasi.")
         base.update({
             "strategy_class_v2": "NOT_EVALUATED",
             "pair_status_v2": "NOT_EVALUATED",
@@ -277,8 +302,14 @@ def classify(prow, ohlcv_lookup):
 
     # --- Gate 2: REJECT hanya bila ada isu berat (gabungan) ---
     if severe:
-        reason = (f"REJECT: isu berat {severe} (vol bucket={vol_bucket}). "
-                  f"Volatilitas saja tidak memicu REJECT; ini kombinasi severe.")
+        if "MALFORMED_PAIR_LABEL" in severe:
+            reason = (f"REJECT: label pasangan cacat / identitas token tidak "
+                      f"lengkap (MALFORMED_PAIR_LABEL) — pasangan TIDAK boleh "
+                      f"dipaper-test sampai token yang hilang/kosong diidentifikasi "
+                      f"dan diverifikasi. Isu berat: {severe} (vol bucket={vol_bucket}).")
+        else:
+            reason = (f"REJECT: isu berat {severe} (vol bucket={vol_bucket}). "
+                      f"Volatilitas saja tidak memicu REJECT; ini kombinasi severe.")
         base.update({
             "strategy_class_v2": "REJECT",
             "pair_status_v2": "REJECT",

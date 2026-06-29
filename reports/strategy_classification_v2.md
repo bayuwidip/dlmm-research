@@ -1,26 +1,26 @@
 # Strategy Classification v0.2 Report
 
-- Run timestamp (UTC): 2026-06-29T13:05:51.741027+00:00
+- Run timestamp (UTC): 2026-06-29T13:48:18.966018+00:00
 - Total pairs classified: 213
 - Phase: READ_ONLY · RESEARCH_ONLY · SCREENING_ONLY · PAPER_ONLY
 
 ## strategy_class_v2 counts
-- CORE: 8
+- CORE: 7
 - TACTICAL: 10
-- REJECT: 2
+- REJECT: 3
 - NOT_EVALUATED: 193
 
 ## test_lane counts
-- CLEAN: 8
+- CLEAN: 7
 - RISKY_BUT_INTERESTING: 10
-- QUARANTINE: 2
+- QUARANTINE: 3
 - NOT_EVALUATED: 193
 
 ## live_eligibility counts
 - NOT_EVALUATED: 193
 - OBSERVE_ONLY: 10
-- PAPER_TEST_ALLOWED: 8
-- NOT_LIVE_ELIGIBLE: 2
+- PAPER_TEST_ALLOWED: 7
+- NOT_LIVE_ELIGIBLE: 3
 - LIVE_ELIGIBLE_* : 0 (forbidden in this phase — never emitted)
 
 ## Classified pairs
@@ -45,7 +45,7 @@
 | HYPE-SOL | OK | MODERATE | CORE | PAPER TEST | 75.0 | 71.0 | CLEAN | PAPER_TEST_ALLOWED | 14 | PAPER_SIM | none |
 | USDC-JUP | OK | HIGH | TACTICAL | WATCHLIST | 71.0 | 81.5 | RISKY_BUT_INTERESTING | OBSERVE_ONLY | 30 | OBSERVE | HIGH_VOLATILITY |
 | JUP-SOL | OK | MODERATE | CORE | PAPER TEST | 75.0 | 70.0 | CLEAN | PAPER_TEST_ALLOWED | 14 | PAPER_SIM | none |
-| -USDT | OK | MODERATE | CORE | PAPER TEST | 76.0 | 72.0 | CLEAN | PAPER_TEST_ALLOWED | 14 | PAPER_SIM | none |
+| -USDT | OK | MODERATE | REJECT | REJECT | 76.0 | 72.0 | QUARANTINE | NOT_LIVE_ELIGIBLE | DATA_NOT_AVAILABLE | NONE | MALFORMED_PAIR_LABEL |
 | SOLANGELES-SOL | OK | EXTREME | TACTICAL | WATCHLIST | 62.0 | 81.0 | RISKY_BUT_INTERESTING | OBSERVE_ONLY | 30 | OBSERVE | FEE_TVL_DISTORTION|EXTREME_VOLATILITY |
 | USDC-PUMP | OK | HIGH | TACTICAL | WATCHLIST | 68.0 | 77.5 | RISKY_BUT_INTERESTING | OBSERVE_ONLY | 30 | OBSERVE | HIGH_VOLATILITY |
 | JLP-USDC | OK | MODERATE | CORE | PAPER TEST | 75.0 | 70.0 | CLEAN | PAPER_TEST_ALLOWED | 14 | PAPER_SIM | none |
@@ -248,7 +248,7 @@
 - **OHLCV unavailable -> NOT_EVALUATED** (volatility cannot be measured; not a REJECT).
 - **Extreme volatility is NOT auto-REJECT.** It becomes TACTICAL when liquidity/volume/fee/data are acceptable; REJECT only when combined with a severe issue (blacklist, no eligible fee pool, unacceptable liquidity/volume, or severe data issue).
 - **TACTICAL is reporting/watchlist only** — no paper entry, no execution, no LP, no rebalance, no wallet.
-- Severe flags (trigger REJECT): ['BLACKLISTED', 'DATA_QUALITY_NA', 'LOW_DATA_COMPLETENESS', 'LOW_LIQUIDITY', 'LOW_VOLUME', 'NO_ELIGIBLE_FEE_POOL'].
+- Severe flags (trigger REJECT): ['BLACKLISTED', 'DATA_QUALITY_NA', 'LOW_DATA_COMPLETENESS', 'LOW_LIQUIDITY', 'LOW_VOLUME', 'MALFORMED_PAIR_LABEL', 'NO_ELIGIBLE_FEE_POOL'].
 - Floors: TVL>=50,000, Vol24h>=50,000, data_completeness>=50.0%.
 - Pool-level scoring stays legacy audit trail only; this v0.2 view is pair-level (primary).
 
