@@ -184,5 +184,62 @@ on combination, not on volatility alone.
 
 ---
 
+## DEC-20260629-007 — GitHub Actions Confirms Strategy Classification v0.2 Pipeline
+
+**Date:** 2026-06-29
+**Decision:** The `collect_and_validate` GitHub Actions workflow — now including the
+Strategy Classification v0.2 step wired after OHLCV and before validation — is confirmed
+working end-to-end in the CI environment. Artifact **`dlmm-run-28375624302`** completed the
+full sequence (fetch → build → OHLCV → strategy classification v0.2 → validate → upload
+artifacts) and uploaded both v0.2 outputs (`data/strategy_classification_v2.csv`,
+`reports/strategy_classification_v2.md`). This closes the CI-confirmation gate left open by
+DEC-20260629-006 and ASM-20260629-006: v0.2 is no longer "local-only" — it is a
+CI-verified pipeline layer.
+
+**Rationale:** DEC-20260629-006 accepted v0.2 only at the local layer, explicitly gating
+promotion on a verified GitHub Actions artifact (per DEC-20260629-005, CI is authoritative,
+not local). Artifact `dlmm-run-28375624302` supplies that confirmation: OHLCV returned
+**20/20 `OK`** in CI, and the classifier and validator both ran without failing the
+workflow. Endpoint reachability, the `extract_candles()` parser, workflow integration, the
+classifier, and the validator are therefore all confirmed functional in GitHub Actions.
+
+**CI results (artifact `dlmm-run-28375624302`, run timestamp 2026-06-29T13:29 UTC):**
+- OHLCV: 20/20 `OK` (0 `API_ERROR`, 0 `MALFORMED_RESPONSE`).
+- `strategy_class_v2` counts: **CORE = 9, TACTICAL = 9, REJECT = 2, NOT_EVALUATED = 194**
+  (214 rows total).
+- `live_eligibility`: 0 rows with any `LIVE_ELIGIBLE_*` value — the no-live guarantee held
+  in CI. PAPER_TEST_ALLOWED and OBSERVE_ONLY appear only on paper/observe terms.
+- Pair count changed from **213 (local) to 214 (CI)** because the CI run fetched a fresh
+  live Meteora snapshot; pair membership and per-pair metrics differ run-to-run by design
+  (online-only, no fixed input). Small count drift between runs is expected, not a defect.
+
+**Scope limits (what this decision does NOT assert):**
+- This confirms the **pipeline mechanism works**, not that any strategy is profitable or
+  live-ready. No edge has been demonstrated.
+- Live execution remains **forbidden**. `validation_gate` stays **red**; max allowed action
+  stays **PAPER_ONLY**.
+- `TACTICAL` remains **observe-only** (`OBSERVE_ONLY`, watchlist) — no paper entry.
+- `PAPER_TEST_ALLOWED` (CORE) means **paper test only** — it is not live eligibility and
+  confers no wallet, signing, swap, LP, rebalance, or execution capability.
+
+**Data-quality follow-up (must be resolved before any paper test of that pair):**
+- The pair labelled **`-USDT`** has a **malformed / blank base token symbol** (empty symbol
+  on one side of the pair). It appears in the OHLCV Top-20 and is classified by v0.2, but
+  the blank symbol is a data-quality red flag (missing/unverified token metadata, possible
+  unverified or malformed token). It must be **reviewed as a data-quality issue and not
+  paper-tested until the base token is positively identified and vetted**, regardless of its
+  `strategy_class_v2` or score. This does not require a code change now; it is a manual
+  review gate recorded here so it is not overlooked.
+
+**Impact:**
+- ASM-20260629-006 status advanced to **VALIDATED IN CI** (artifact `dlmm-run-28375624302`),
+  with a standing caveat that future runs may differ due to live market/API conditions.
+- v0.2 is treated as a confirmed pipeline layer for reporting/screening purposes only;
+  all phase gates (PAPER_ONLY, no live execution, TACTICAL observe-only) remain in force.
+- `CLAUDE.md` OHLCV status (currently describing local `API_ERROR`) is now out of date and
+  may be updated in a separate, explicitly-scoped step.
+
+---
+
 *This log is append-only. Do not edit or delete past entries.*
 *New decisions are added at the bottom.*

@@ -154,11 +154,29 @@ This is a future concern — no Telegram code is written in the current phase.
 ## ASM-20260629-006 — Local OHLCV API_ERROR Artifacts May Be Stale
 
 **Date:** 2026-06-29
-**Status:** **VALIDATED LOCALLY (2026-06-29) — not closed; pending GitHub Actions
-artifact confirmation.**
+**Status:** **VALIDATED IN CI (2026-06-29) — GitHub Actions artifact
+`dlmm-run-28375624302` confirmed. Endpoint/parser/workflow healthy; not a
+profitability or live-readiness claim.**
 **Assumption:** The local `data/ohlcv_top_pairs.csv` and `reports/ohlcv_report.md`
 showing `API_ERROR` for all 20 top pairs reflect a **transient or environment-specific
 failure**, not a permanent unavailability of the OHLCV endpoint.
+
+**CI confirmation (2026-06-29):** GitHub Actions artifact **`dlmm-run-28375624302`**
+ran the full pipeline (fetch → build → OHLCV → strategy classification v0.2 → validate →
+upload) in the CI environment and returned OHLCV **20/20 `OK` (0 `API_ERROR`,
+0 `MALFORMED_RESPONSE`)**. This is the authoritative confirmation called for in the review
+trigger below and by DEC-20260629-005: CI — not local — verifies endpoint reachability,
+the `extract_candles()` parser, the workflow wiring, the classifier, and the validator all
+function in the GitHub Actions environment. The earlier all-`API_ERROR` artifact is
+conclusively a stale/transient failure artifact. See DEC-20260629-007.
+
+**Caveat (assumption remains under standing review, not permanently closed):** a single
+successful CI run confirms the mechanism, not a permanent guarantee. Live market and API
+conditions can change — pool sets churn, individual pools can be delisted, and the endpoint
+can have transient outages — so a future CI run may legitimately show some `API_ERROR` /
+`DATA_NOT_AVAILABLE` rows. That is expected, non-failing behavior (such pairs become
+`NOT_EVALUATED`, never `REJECT`) and does not by itself reopen this assumption unless CI
+shows persistent total failure across multiple runs on different days.
 
 **Review note (2026-06-29):** A local diagnostic re-run of
 `scripts/fetch_ohlcv_top_pairs.py` returned **20/20 `OK`** against the unchanged endpoint
