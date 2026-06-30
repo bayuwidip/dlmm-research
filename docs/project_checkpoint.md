@@ -111,6 +111,195 @@ python3 scripts/run_readonly_pipeline.py \
   --import-risk-decisions-db
 ```
 
+Newly merged (this update — PRs #19 to #25):
+
+- **#19 — Checkpoint updated for risk decisions DB import.**
+- **#20 — Runtime risk dashboard report builder.** Read-only DuckDB history dashboard
+  (no execution authority).
+- **#21 — Hermes proposal-only design.** Design-only document for a proposal-only,
+  read-only historical reviewer.
+- **#22 — ARGUS proposal-only reviewer.** The reviewer (renamed from Hermes — see §3c).
+- **#23 — ARGUS proposal report builder.**
+- **#24 — Fee pool blocker diagnostics** (`NO_ELIGIBLE_FEE_POOL`).
+- **#25 — Pair stability diagnostics.**
+
+See §3b–§3h below for the detailed 2026-06-30 checkpoint state.
+
+---
+
+## 3b. ARGUS Rename and Role (2026-06-30)
+
+- The internal working name **Hermes** was renamed to **ARGUS** to avoid confusion with
+  external Hermes agent projects.
+- **ARGUS is a proposal-only historical reviewer.**
+- ARGUS may **observe, summarize, and propose** to human / council.
+- ARGUS has:
+  - **no execution authority**
+  - **no trading authority**
+  - **no DB write authority**
+  - **no code-edit authority**
+  - **no risk-policy authority**
+
+(The legacy design document `docs/argus_reviewer_design.md` still carries the historical
+"Hermes" name in places; the binding name going forward is ARGUS.)
+
+---
+
+## 3c. Current Runtime Evidence (2026-06-30)
+
+Runtime DB path: `runtime/dlmm.duckdb`
+
+Latest confirmed runtime state:
+
+| Table | Count |
+|---|---|
+| `pipeline_runs` | 5 |
+| `pipeline_steps` | 35 |
+| `strategy_observations` | 1441 |
+| `risk_flags` | 2897 |
+| `risk_decisions` | 213 |
+| `future_position_events` | **0** |
+
+- All latest runtime runs were **SUCCESS**.
+- The safety boundary holds because **`future_position_events` remains 0**.
+
+---
+
+## 3d. ARGUS 5-Run Report (2026-06-30)
+
+- Evidence sufficiency moved from **INSUFFICIENT** to **SUFFICIENT**.
+- **SUFFICIENT means sufficient for risk-pattern / diagnostic review only.**
+- It does **NOT** authorize paper simulation, paper entries, paper trades, open positions,
+  wallet usage, signing, swaps, LP actions, rebalances, or live execution.
+- ARGUS proposals after 5 runs (proposals to human / council only):
+  - `RECURRING_BLOCKER_REVIEW`
+  - `CLASSIFICATION_CHURN_REVIEW`
+  - `DATA_QUALITY_REVIEW`
+  - `SAFETY_BOUNDARY_REVIEW`
+- **No automatic action authorized.**
+
+---
+
+## 3e. NO_ELIGIBLE_FEE_POOL Diagnostics (2026-06-30)
+
+Summary:
+
+- pipeline run count: 5
+- `future_position_events` count: 0
+- total `NO_ELIGIBLE_FEE_POOL` flags: 286
+- total `NO_ELIGIBLE_FEE_POOL` decisions: 44
+- affected pair count: 70
+
+Interpretation:
+
+- The blocker mostly affects `NOT_EVALUATED` / `BLOCKED` / `REJECT` / `NONE` pairs.
+- It does **not** currently appear to be blocking the strongest `CORE` / `CLEAN` review
+  candidates.
+- It looks more like a useful filter for noisy / low-quality / unready pairs than a reason
+  to loosen rules.
+
+Council decision:
+
+- Do **not** loosen fee-pool thresholds.
+- Do **not** change risk policy.
+- Do **not** unblock `NO_ELIGIBLE_FEE_POOL` pairs.
+- Treat this blocker as **valid** unless manual data-quality review proves otherwise.
+
+---
+
+## 3f. Pair Stability Diagnostics (2026-06-30)
+
+Summary:
+
+- pipeline run count: 5
+- distinct runs in observation history: 7
+- `future_position_events` count: 0
+- total observation rows: 1441
+- total risk-decision rows: 213
+- total pairs analysed: 250
+- evidence sufficiency: **SUFFICIENT**
+
+Stability labels:
+
+| Label | Count |
+|---|---|
+| `STABLE_REVIEW_CANDIDATE` | 6 |
+| `STABLE_OBSERVE_ONLY` | 149 |
+| `CHURNING_CLASS` | 9 |
+| `MOSTLY_BLOCKED` | 43 |
+| `ONE_OFF` | 43 |
+
+The diagnostic remains **read-only** and does **not** authorize paper entries, live entries,
+wallet use, swaps, LP actions, rebalances, threshold changes, risk-policy changes, or
+candidate-status changes.
+
+---
+
+## 3g. Stable Review Candidate Shortlist (2026-06-30)
+
+The 6 stable review candidates:
+
+- HYPE-SOL
+- HYPE-USDC
+- JUP-SOL
+- TRUMP-USDC
+- USDC-SOL
+- USDC-cbBTC
+
+Observed common pattern across all six:
+
+- `observation_count`: 7
+- `distinct_run_count`: 7
+- `strategy_class`: `CORE`
+- `lane`: `CLEAN`
+- `strategy_class_change_count`: 0
+- `lane_change_count`: 0
+- `latest_risk_decision`: `PAPER_REVIEW_CANDIDATE`
+- `latest_max_allowed_action`: `FUTURE_PAPER_SIMULATION_REVIEW`
+- `blocked_count`: 0
+
+**Important caveat:** `paper_review_candidate_count` is still only **1** for each pair.
+Therefore they are stable `CORE` / `CLEAN` candidates, but **not** automatically ready for
+paper simulation.
+
+Correct status:
+
+- **human / council may review for future paper-simulation design consideration**
+
+Incorrect status (these do NOT apply):
+
+- not paper entry
+- not paper trade
+- not open position
+- not live
+- not approved
+
+### Suggested candidate review priority (human / council review only)
+
+1. **USDC-SOL** — benchmark pair
+2. **JUP-SOL** — Solana ecosystem candidate
+3. **USDC-cbBTC** — wrapped / bridged BTC / data-source review needed
+4. **HYPE-USDC** — token / pool validation needed
+5. **HYPE-SOL** — token / pool validation needed
+6. **TRUMP-USDC** — highest narrative / meme / political-risk sensitivity
+
+This priority is for human / council review only.
+
+---
+
+## 3h. Current Council Decision (2026-06-30)
+
+- Do **not** go live.
+- Do **not** create paper positions.
+- Do **not** write `future_position_events`.
+- Do **not** change risk policy.
+- Do **not** change thresholds.
+- Do **not** change candidate statuses.
+- Do **not** loosen `NO_ELIGIBLE_FEE_POOL`.
+- **Continue diagnostic work.**
+- **Next best task:** Candidate Deep Review Report for the 6 stable review candidates
+  (see §13).
+
 ---
 
 ## 4. Current Pipeline
@@ -230,6 +419,13 @@ not authorize any on-chain action.
   via the standalone importer or the optional `--import-risk-decisions-db` runner flag.
 - `future_position_events` remains schema-only/reserved and must not be written by the
   current pipeline.
+
+**Cleanup rule (generated artifacts):**
+
+- Generated outputs should usually **not** be committed unless explicitly approved.
+- Runtime diagnostic outputs under `reports/runtime/` and ARGUS outputs under
+  `reports/argus/` are **local generated artifacts** and should be **removed before code
+  commits** unless explicitly approved.
 
 ---
 
@@ -352,14 +548,64 @@ Runtime/storage + risk safety clarifications:
 These are the recommended next milestones. Each preserves the §2 safety boundary. None of
 them authorizes paper entry or live execution.
 
-**Done (PRs #17–#18):**
+**Done (PRs #17–#25):**
 - ~~Risk decisions DuckDB importer~~ — merged (`scripts/import_risk_decisions_to_db.py`, #17).
 - ~~Runtime runner optional risk DB import~~ — merged (`--import-risk-decisions-db`, #18).
+- ~~Runtime / Risk Dashboard Report~~ — merged (#20, read-only DuckDB history dashboard).
+- ~~ARGUS proposal-only reviewer + report builder~~ — merged (#21–#23).
+- ~~NO_ELIGIBLE_FEE_POOL fee-pool blocker diagnostics~~ — merged (#24).
+- ~~Pair stability diagnostics~~ — merged (#25).
 
-**Next milestone — Runtime / Risk Dashboard Report**
+**Next recommended coding task — Candidate Deep Review Report**
+
+Branch: `feature/candidate-deep-review`
+
+Proposed files:
+- `scripts/build_candidate_deep_review.py`
+- `tests/test_build_candidate_deep_review.py`
+
+Purpose: create a **read-only** candidate deep-review report for the 6
+`STABLE_REVIEW_CANDIDATE` pairs (see §3g).
+
+The report should summarize, per candidate:
+- `pair_key`
+- `pair_label`
+- `observation_count`
+- `distinct_run_count`
+- strategy_class history
+- lane history
+- latest risk decision
+- latest risk action
+- latest max allowed action
+- risk flags
+- blocker history
+- OHLCV / data availability notes
+- liquidity / volume / volatility flags if available
+- manual review notes
+- data gaps
+- suggested human / council questions
+
+**Forbidden in this task** (must not be implemented):
+- authorize paper entry
+- create paper positions
+- write `future_position_events`
+- generate signals
+- access wallet / private key
+- execute swaps / LP / rebalances
+- change thresholds
+- change risk policy
+- change candidate status
+
+**Safe wording to use:** "human / council may review for future paper-simulation design
+consideration".
+
+**Unsafe wording to avoid:** `approved`, `execute`, `signal`, `live eligible`,
+`open position`, `paper trade`, `enter paper`.
+
+**Earlier milestone (already merged) — Runtime / Risk Dashboard Report (#20)**
 
 A **read-only** dashboard that summarizes the DuckDB history (local-only, no execution
-authority). It should report:
+authority). It reports:
 - pipeline run success/failure
 - pipeline step failures
 - latest observation counts
