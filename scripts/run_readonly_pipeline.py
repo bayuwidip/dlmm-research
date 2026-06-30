@@ -73,6 +73,17 @@ DEFAULT_LOG_DIR = "runtime/logs"
 DEFAULT_LOCK_DIR = "runtime/locks"
 DEFAULT_SUMMARY_DIR = "runtime/run_summaries"
 
+# Optional DuckDB write support (only active when --write-db PATH is provided).
+# The runner NEVER creates or initializes the database; it only imports its own
+# already-written summary JSON into an EXISTING DB via the run-summary importer.
+DB_WRITE_NOT_REQUESTED = "NOT_REQUESTED"
+DB_WRITE_PENDING = "PENDING"
+DB_WRITE_SUCCESS = "SUCCESS"
+DB_WRITE_FAILED = "FAILED"
+
+# Exact message required when --write-db points at a non-existent database.
+DB_MISSING_MSG = "DuckDB database not found. Run scripts/init_runtime_db.py first."
+
 
 def build_default_steps() -> List[Tuple[str, List[str]]]:
     """Return the ordered pipeline steps as (name, command-list) tuples.
@@ -328,6 +339,58 @@ def run_pipeline(
 
 
 # --------------------------------------------------------------------------- #
+# Optional DuckDB write support
+# --------------------------------------------------------------------------- #
+
+def db_file_present(db_path) -> bool:
+    """Return True only if db_path points to an existing regular file.
+
+    Pure filesystem check (stdlib only). It never creates the database file or
+    its parent directory — the runner does not auto-create the DB.
+    """
+    return Path(db_path).is_file()
+
+
+def _load_importer():
+    """Deferred import of scripts/import_run_summary_to_db.py.
+
+    Imported lazily (only when --write-db is used) so a normal run never depends
+    on the importer module or on duckdb. The importer itself defers its own
+    duckdb import, so loading this module does not pull in duckdb.
+    """
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import import_run_summary_to_db as importer  # noqa: PLC0415
+    return importer
+
+
+def import_run_summary_into_db(db_path, summary_json_path) -> str:
+    """Import an already-written run summary JSON into an EXISTING DuckDB.
+
+    Reuses scripts/import_run_summary_to_db.py instead of duplicating SQL, so the
+    importer's guarantees hold: it writes ONLY to pipeline_runs and
+    pipeline_steps and never to strategy_observations, risk_flags, or
+    future_position_events. Imports with upsert=True so re-importing the same
+    run_id is idempotent. Never creates or initializes the database.
+
+    Returns DB_WRITE_SUCCESS or DB_WRITE_FAILED. Does not raise.
+    """
+    try:
+        importer = _load_importer()
+        rc = importer.run_import(
+            db_path=str(db_path),
+            summary_json=str(summary_json_path),
+            dry_run=False,
+            upsert=True,
+        )
+    except Exception as exc:  # defensive: run_import normally returns a code
+        print(f"ERROR: DuckDB import failed: {exc}", file=sys.stderr)
+        return DB_WRITE_FAILED
+    return DB_WRITE_SUCCESS if rc == 0 else DB_WRITE_FAILED
+
+
+# --------------------------------------------------------------------------- #
 # Summary generation
 # --------------------------------------------------------------------------- #
 
@@ -339,6 +402,8 @@ def build_summary_dict(
     continue_on_ohlcv_error: bool,
     stale_lock_replaced: bool,
     log_file: str,
+    db_path: Optional[str] = None,
+    db_write_status: str = DB_WRITE_NOT_REQUESTED,
 ) -> dict:
     return {
         "run_id": run_id,
@@ -351,6 +416,8 @@ def build_summary_dict(
         "ohlcv_error_tolerated": outcome.ohlcv_error_tolerated,
         "stale_lock_replaced": stale_lock_replaced,
         "log_file": str(log_file),
+        "db_path": db_path,
+        "db_write_status": db_write_status,
         "steps": [s.to_dict() for s in outcome.steps],
     }
 
@@ -367,6 +434,10 @@ def build_summary_markdown(summary: dict, summary_json_path: str) -> str:
     lines.append(f"- **continue_on_ohlcv_error:** {summary['continue_on_ohlcv_error']}")
     lines.append(f"- **ohlcv_error_tolerated:** {summary['ohlcv_error_tolerated']}")
     lines.append(f"- **stale_lock_replaced:** {summary['stale_lock_replaced']}")
+    lines.append(
+        f"- **DB write status:** {summary.get('db_write_status', DB_WRITE_NOT_REQUESTED)}"
+    )
+    lines.append(f"- **DB path:** {summary.get('db_path')}")
     lines.append("")
     lines.append("## Safety Boundary")
     lines.append("")
@@ -399,6 +470,21 @@ def build_summary_markdown(summary: dict, summary_json_path: str) -> str:
     )
     lines.append("")
     return "\n".join(lines)
+
+
+def write_summary_files(summary: dict, summary_json_path, summary_md_path) -> None:
+    """Write the run summary JSON and Markdown artifacts to disk.
+
+    Pulled out so the runner can (re-)write both atomically from one place,
+    including a second write that records the final DB write status.
+    """
+    with Path(summary_json_path).open("w", encoding="utf-8") as fh:
+        json.dump(summary, fh, indent=2)
+        fh.write("\n")
+
+    markdown = build_summary_markdown(summary, str(summary_json_path))
+    with Path(summary_md_path).open("w", encoding="utf-8") as fh:
+        fh.write(markdown)
 
 
 # --------------------------------------------------------------------------- #
@@ -434,6 +520,17 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=DEFAULT_SUMMARY_DIR,
         help=f"Directory for timestamped run summaries (default: {DEFAULT_SUMMARY_DIR}).",
     )
+    parser.add_argument(
+        "--write-db",
+        default=None,
+        metavar="PATH",
+        help=(
+            "After the run, import this run's summary JSON into an EXISTING DuckDB "
+            "at PATH (writes only pipeline_runs + pipeline_steps, upsert). The DB "
+            "must already exist — run scripts/init_runtime_db.py first; it is never "
+            "auto-created, auto-initialized, or written to without this flag."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -446,13 +543,23 @@ def print_dry_run(steps: List[Tuple[str, List[str]]], args: argparse.Namespace) 
     for i, (name, command) in enumerate(steps, start=1):
         print(f"  {i}. {name}: {' '.join(command)}")
     print()
+    write_db = getattr(args, "write_db", None)
     print(f"continue_on_ohlcv_error : {args.continue_on_ohlcv_error}")
     print(f"log-dir                 : {args.log_dir}")
     print(f"lock-dir                : {args.lock_dir}")
     print(f"summary-dir             : {args.summary_dir}")
+    print(f"write-db                : {write_db if write_db else '(disabled)'}")
     print()
+    if write_db:
+        print(
+            f"DB write is PLANNED but NOT executed in dry run: would import the run "
+            f"summary JSON into existing DuckDB '{write_db}' "
+            f"(pipeline_runs + pipeline_steps only, upsert). The database is not "
+            f"created, initialized, or touched during a dry run."
+        )
+        print()
     print("Dry run: no runtime directories created, no lock file created, "
-          "no child scripts executed.")
+          "no child scripts executed, no database written.")
 
 
 def execute_run(
@@ -464,6 +571,15 @@ def execute_run(
     """Execute a real (non-dry-run) pipeline run. Returns a process exit code."""
     if steps is None:
         steps = build_default_steps()
+
+    write_db = getattr(args, "write_db", None)
+
+    # Pre-flight: if a DB write was requested, the DB must already exist. We
+    # never auto-create or auto-initialize it. Fail fast before doing any work
+    # so a missing DB does not waste a full pipeline run or create runtime dirs.
+    if write_db and not db_file_present(write_db):
+        print(f"ERROR: {DB_MISSING_MSG}", file=sys.stderr)
+        return 2
 
     log_dir = Path(args.log_dir)
     lock_dir = Path(args.lock_dir)
@@ -511,6 +627,7 @@ def execute_run(
             )
 
         ended_at = now_fn()
+        db_write_status = DB_WRITE_PENDING if write_db else DB_WRITE_NOT_REQUESTED
         summary = build_summary_dict(
             run_id=run_id,
             started_at=started_at,
@@ -519,15 +636,25 @@ def execute_run(
             continue_on_ohlcv_error=args.continue_on_ohlcv_error,
             stale_lock_replaced=stale_lock_replaced,
             log_file=str(log_path),
+            db_path=write_db,
+            db_write_status=db_write_status,
         )
 
-        with summary_json_path.open("w", encoding="utf-8") as fh:
-            json.dump(summary, fh, indent=2)
-            fh.write("\n")
+        # Write the summary JSON first; the importer reads this exact file. The
+        # summary Markdown is written here too so artifacts exist even if the
+        # optional DB import below fails.
+        write_summary_files(summary, summary_json_path, summary_md_path)
 
-        markdown = build_summary_markdown(summary, str(summary_json_path))
-        with summary_md_path.open("w", encoding="utf-8") as fh:
-            fh.write(markdown)
+        # Optional DuckDB write happens only AFTER the summary JSON exists, on
+        # both successful and failed pipeline runs. A failed import makes the
+        # runner exit non-zero, but never converts a failed pipeline into a pass.
+        db_import_failed = False
+        if write_db:
+            db_write_status = import_run_summary_into_db(write_db, summary_json_path)
+            db_import_failed = db_write_status != DB_WRITE_SUCCESS
+            summary["db_write_status"] = db_write_status
+            # Re-write artifacts with the final DB write status.
+            write_summary_files(summary, summary_json_path, summary_md_path)
 
         print(f"Run {run_id} finished: {outcome.status}")
         if stale_lock_replaced:
@@ -535,8 +662,12 @@ def execute_run(
         print(f"Log     : {log_path}")
         print(f"Summary : {summary_json_path}")
         print(f"Markdown: {summary_md_path}")
+        if write_db:
+            print(f"DB write: {db_write_status} -> {write_db}")
 
-        return 0 if outcome.status == "SUCCESS" else 1
+        if outcome.status != "SUCCESS" or db_import_failed:
+            return 1
+        return 0
     finally:
         release_lock(lock_path)
 

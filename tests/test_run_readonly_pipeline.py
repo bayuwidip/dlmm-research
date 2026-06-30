@@ -10,16 +10,39 @@ fast.
 Run: python3 -m unittest tests/test_run_readonly_pipeline.py
 """
 
+import importlib.util
+import io
+import json
 import os
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import run_readonly_pipeline as rop  # noqa: E402
+
+
+def _load_module(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# Loaded only to initialize a real DuckDB for the integration tests below.
+idb = _load_module("init_runtime_db", REPO_ROOT / "scripts" / "init_runtime_db.py")
+
+try:
+    import duckdb  # noqa: F401
+
+    HAS_DUCKDB = True
+except ImportError:
+    HAS_DUCKDB = False
 
 
 # A fixed clock that advances one second on each call, so durations are stable.
@@ -43,6 +66,7 @@ def make_args(tmp, **overrides):
         log_dir=str(Path(tmp) / "logs"),
         lock_dir=str(Path(tmp) / "locks"),
         summary_dir=str(Path(tmp) / "summaries"),
+        write_db=overrides.get("write_db", None),
     )
     return ns
 
@@ -310,6 +334,331 @@ class ExecuteRunIntegrationTests(unittest.TestCase):
     @staticmethod
     def _noop_steps():
         return [("fetch_meteora_pools", ["python3", "scripts/fetch_meteora_pools.py"])]
+
+
+# --------------------------------------------------------------------------- #
+# Optional DuckDB write support (--write-db)
+# --------------------------------------------------------------------------- #
+
+def _ok_steps():
+    return [
+        ("fetch_meteora_pools", ["python3", "scripts/fetch_meteora_pools.py"]),
+        (rop.VALIDATE_STEP_NAME, ["python3", "scripts/validate_watchlist.py"]),
+    ]
+
+
+def _read_summary_json(summary_dir):
+    jsons = list(Path(summary_dir).glob("run_*.json"))
+    assert len(jsons) == 1, f"expected one summary json, found {jsons}"
+    with jsons[0].open("r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _read_summary_md(summary_dir):
+    mds = list(Path(summary_dir).glob("run_*.md"))
+    assert len(mds) == 1, f"expected one summary md, found {mds}"
+    return mds[0].read_text(encoding="utf-8")
+
+
+class WriteDbDefaultTests(unittest.TestCase):
+    """Default behavior: no --write-db means no DB dependency and no DB write."""
+
+    def test_default_run_does_not_import_or_write_db(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_args(tmp)  # write_db defaults to None
+            runner = fake_runner_factory({})
+
+            # If the importer is reached at all, fail the test.
+            def boom(*a, **k):  # pragma: no cover - must never run
+                raise AssertionError("DB import must not run without --write-db")
+
+            original = rop.import_run_summary_into_db
+            rop.import_run_summary_into_db = boom
+            try:
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=runner, now_fn=FakeClock()
+                )
+            finally:
+                rop.import_run_summary_into_db = original
+
+            self.assertEqual(rc, 0)
+            summary = _read_summary_json(args.summary_dir)
+            self.assertEqual(summary["db_write_status"], rop.DB_WRITE_NOT_REQUESTED)
+            self.assertIsNone(summary["db_path"])
+
+    def test_summary_has_not_requested_status_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_args(tmp)
+            rop.execute_run(
+                args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                now_fn=FakeClock(),
+            )
+            summary = _read_summary_json(args.summary_dir)
+            self.assertIn("db_write_status", summary)
+            self.assertIn("db_path", summary)
+            md = _read_summary_md(args.summary_dir)
+            self.assertIn("DB write status", md)
+            self.assertIn(rop.DB_WRITE_NOT_REQUESTED, md)
+
+
+class WriteDbDryRunTests(unittest.TestCase):
+    def test_dry_run_with_write_db_touches_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "runtime" / "dlmm.duckdb"  # does NOT exist
+
+            def boom(name, command):  # pragma: no cover - must never run
+                raise AssertionError("child step executed during dry run")
+
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = rop.main(
+                    [
+                        "--dry-run",
+                        "--write-db", str(db_path),
+                        "--log-dir", str(Path(tmp) / "logs"),
+                        "--lock-dir", str(Path(tmp) / "locks"),
+                        "--summary-dir", str(Path(tmp) / "summaries"),
+                    ]
+                )
+            self.assertEqual(rc, 0)
+            # No runtime dirs, no DB, no lock created.
+            self.assertFalse((Path(tmp) / "logs").exists())
+            self.assertFalse((Path(tmp) / "locks").exists())
+            self.assertFalse((Path(tmp) / "summaries").exists())
+            self.assertFalse(db_path.exists())
+            self.assertFalse(db_path.parent.exists())
+            # Must announce that a DB write is planned but not executed.
+            out = buf.getvalue()
+            self.assertIn("PLANNED", out)
+            self.assertIn("NOT executed", out)
+
+
+class WriteDbMissingDbTests(unittest.TestCase):
+    def test_missing_db_fails_with_clear_message_and_no_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_args(tmp, write_db=str(Path(tmp) / "runtime" / "dlmm.duckdb"))
+
+            def boom(name, command):  # pragma: no cover - pipeline must not run
+                raise AssertionError("pipeline ran despite missing DB")
+
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=boom, now_fn=FakeClock()
+                )
+            self.assertEqual(rc, 2)
+            self.assertEqual(err.getvalue().strip(), f"ERROR: {rop.DB_MISSING_MSG}")
+            self.assertEqual(
+                err.getvalue().strip(),
+                "ERROR: DuckDB database not found. Run scripts/init_runtime_db.py first.",
+            )
+            # Fail-fast: no runtime dirs and definitely no DB created.
+            self.assertFalse((Path(args.log_dir)).exists())
+            self.assertFalse((Path(args.lock_dir)).exists())
+            self.assertFalse((Path(args.summary_dir)).exists())
+            self.assertFalse(Path(args.write_db).exists())
+            self.assertFalse(Path(args.write_db).parent.exists())
+
+
+class WriteDbImportStatusTests(unittest.TestCase):
+    """Status plumbing via a fake importer — runs without duckdb installed."""
+
+    def _existing_db_path(self, tmp):
+        # A plain file is enough to pass the runner's pre-flight existence check;
+        # the importer itself is faked in these tests.
+        db_path = Path(tmp) / "runtime" / "dlmm.duckdb"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db_path.write_text("placeholder")
+        return db_path
+
+    def test_success_status_recorded_in_json_and_md(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._existing_db_path(tmp)
+            args = make_args(tmp, write_db=str(db_path))
+            calls = []
+
+            def fake_import(p, s):
+                calls.append((str(p), str(s)))
+                return rop.DB_WRITE_SUCCESS
+
+            original = rop.import_run_summary_into_db
+            rop.import_run_summary_into_db = fake_import
+            try:
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            finally:
+                rop.import_run_summary_into_db = original
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(calls), 1)
+            summary = _read_summary_json(args.summary_dir)
+            # Import is called with the summary JSON that exists on disk.
+            on_disk = next(Path(args.summary_dir).glob("run_*.json"))
+            self.assertEqual(calls[0][1], str(on_disk))
+            self.assertEqual(summary["db_write_status"], rop.DB_WRITE_SUCCESS)
+            self.assertEqual(summary["db_path"], str(db_path))
+            md = _read_summary_md(args.summary_dir)
+            self.assertIn("DB write status", md)
+            self.assertIn(rop.DB_WRITE_SUCCESS, md)
+
+    def test_import_failure_makes_runner_exit_nonzero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._existing_db_path(tmp)
+            args = make_args(tmp, write_db=str(db_path))
+
+            def fake_import(p, s):
+                return rop.DB_WRITE_FAILED
+
+            original = rop.import_run_summary_into_db
+            rop.import_run_summary_into_db = fake_import
+            try:
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            finally:
+                rop.import_run_summary_into_db = original
+
+            # Pipeline succeeded, but import failed -> non-zero exit.
+            self.assertNotEqual(rc, 0)
+            summary = _read_summary_json(args.summary_dir)
+            self.assertEqual(summary["status"], "SUCCESS")
+            self.assertEqual(summary["db_write_status"], rop.DB_WRITE_FAILED)
+
+    def test_failed_pipeline_still_imports_and_still_exits_nonzero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._existing_db_path(tmp)
+            args = make_args(tmp, write_db=str(db_path))
+            calls = []
+
+            def fake_import(p, s):
+                calls.append((str(p), str(s)))
+                return rop.DB_WRITE_SUCCESS
+
+            original = rop.import_run_summary_into_db
+            rop.import_run_summary_into_db = fake_import
+            try:
+                # Validation step fails -> pipeline FAILED.
+                runner = fake_runner_factory({rop.VALIDATE_STEP_NAME: 1})
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=runner, now_fn=FakeClock()
+                )
+            finally:
+                rop.import_run_summary_into_db = original
+
+            # Failed run summary was still imported...
+            self.assertEqual(len(calls), 1)
+            summary = _read_summary_json(args.summary_dir)
+            self.assertEqual(summary["status"], "FAILED")
+            self.assertEqual(summary["db_write_status"], rop.DB_WRITE_SUCCESS)
+            # ...but the runner still exits non-zero because the pipeline failed.
+            self.assertNotEqual(rc, 0)
+
+
+@unittest.skipUnless(HAS_DUCKDB, "duckdb not installed")
+class WriteDbRealDuckDbTests(unittest.TestCase):
+    """End-to-end against a real initialized DuckDB via the real importer."""
+
+    def _init_db(self, tmp):
+        db_path = Path(tmp) / "runtime" / "dlmm.duckdb"
+        idb.init_db(str(db_path))
+        return db_path
+
+    def _counts(self, db_path):
+        conn = duckdb.connect(str(db_path))
+        try:
+            return {
+                "runs": conn.execute("SELECT COUNT(*) FROM pipeline_runs").fetchone()[0],
+                "steps": conn.execute("SELECT COUNT(*) FROM pipeline_steps").fetchone()[0],
+                "obs": conn.execute(
+                    "SELECT COUNT(*) FROM strategy_observations"
+                ).fetchone()[0],
+                "flags": conn.execute("SELECT COUNT(*) FROM risk_flags").fetchone()[0],
+                "fpe": conn.execute(
+                    "SELECT COUNT(*) FROM future_position_events"
+                ).fetchone()[0],
+            }
+        finally:
+            conn.close()
+
+    def test_successful_run_imports_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._init_db(tmp)
+            args = make_args(tmp, write_db=str(db_path))
+            with redirect_stdout(io.StringIO()):
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            self.assertEqual(rc, 0)
+            counts = self._counts(db_path)
+            self.assertEqual(counts["runs"], 1)
+            self.assertEqual(counts["steps"], len(_ok_steps()))
+            summary = _read_summary_json(args.summary_dir)
+            self.assertEqual(summary["db_write_status"], rop.DB_WRITE_SUCCESS)
+
+    def test_failed_run_imports_summary_but_exits_nonzero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._init_db(tmp)
+            args = make_args(tmp, write_db=str(db_path))
+            runner = fake_runner_factory({rop.VALIDATE_STEP_NAME: 1})
+            with redirect_stdout(io.StringIO()):
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=runner, now_fn=FakeClock()
+                )
+            self.assertNotEqual(rc, 0)
+            counts = self._counts(db_path)
+            self.assertEqual(counts["runs"], 1, "failed run must still be imported")
+            row_status = duckdb.connect(str(db_path)).execute(
+                "SELECT status FROM pipeline_runs"
+            ).fetchone()[0]
+            self.assertEqual(row_status, "FAILED")
+
+    def test_write_db_only_touches_runs_and_steps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._init_db(tmp)
+            args = make_args(tmp, write_db=str(db_path))
+            with redirect_stdout(io.StringIO()):
+                rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            counts = self._counts(db_path)
+            self.assertEqual(counts["obs"], 0, "must not write strategy_observations")
+            self.assertEqual(counts["flags"], 0, "must not write risk_flags")
+            self.assertEqual(counts["fpe"], 0, "must not write future_position_events")
+
+    def test_reimport_same_run_id_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._init_db(tmp)
+            args = make_args(tmp, write_db=str(db_path))
+            clock = FakeClock()
+            with redirect_stdout(io.StringIO()):
+                rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=clock,
+                )
+            summary = _read_summary_json(args.summary_dir)
+            run_id = summary["run_id"]
+
+            # Re-import the exact same summary JSON directly (upsert path).
+            importer = rop._load_importer()
+            with redirect_stdout(io.StringIO()):
+                rc = importer.run_import(
+                    db_path=str(db_path),
+                    summary_json=str(next(Path(args.summary_dir).glob("run_*.json"))),
+                    dry_run=False,
+                    upsert=True,
+                )
+            self.assertEqual(rc, 0)
+            counts = self._counts(db_path)
+            self.assertEqual(counts["runs"], 1, "upsert must not duplicate the run")
+            only_run_id = duckdb.connect(str(db_path)).execute(
+                "SELECT run_id FROM pipeline_runs"
+            ).fetchone()[0]
+            self.assertEqual(only_run_id, run_id)
 
 
 if __name__ == "__main__":
