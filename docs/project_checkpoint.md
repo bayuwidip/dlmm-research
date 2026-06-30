@@ -31,6 +31,13 @@
 - GitHub Actions now runs the observation pipeline
 - Pull request checks are enabled through the `pull_request` trigger
 - Observation artifacts are uploaded in CI
+- Target Architecture merged (`docs/target_architecture.md`)
+- Read-only Runtime Orchestrator merged (`scripts/run_readonly_pipeline.py`)
+- Optional DB write support for the runtime runner merged (`--write-db`)
+- Runtime DuckDB schema initializer merged (`scripts/init_runtime_db.py`)
+- Runtime DuckDB inspector merged (`scripts/inspect_runtime_db.py`)
+- Run summary DuckDB importer merged (`scripts/import_run_summary_to_db.py`)
+- Strategy observations DuckDB importer merged (`scripts/import_strategy_observations_to_db.py`)
 
 ---
 
@@ -49,6 +56,7 @@ fetch_meteora_pools.py
 
 ## 5. Important Scripts
 
+**Pipeline (read-only screening):**
 - `scripts/fetch_meteora_pools.py`
 - `scripts/build_watchlist.py`
 - `scripts/fetch_ohlcv_top_pairs.py`
@@ -56,9 +64,50 @@ fetch_meteora_pools.py
 - `scripts/observe_strategy.py`
 - `scripts/validate_watchlist.py`
 
+**Runtime / storage (local VPS, read-only):**
+- `scripts/run_readonly_pipeline.py` — runtime orchestrator (sequential runner, logs, summaries, lock file, optional `--write-db`)
+- `scripts/init_runtime_db.py` — initialize the runtime DuckDB schema
+- `scripts/inspect_runtime_db.py` — audit/inspect runtime DB state
+- `scripts/import_run_summary_to_db.py` — import run summary into DuckDB
+- `scripts/import_strategy_observations_to_db.py` — import strategy observations into DuckDB
+
 ---
 
-## 6. Important Data / Report Outputs
+## 6. Runtime / Storage Flow
+
+Current manual/runtime storage flow (local VPS, read-only):
+
+```
+run_readonly_pipeline.py --write-db runtime/dlmm.duckdb
+  → pipeline_runs
+  → pipeline_steps
+
+import_strategy_observations_to_db.py
+  → strategy_observations
+  → optional risk_flags
+
+inspect_runtime_db.py
+  → audit database state
+```
+
+This flow records history only. It performs no execution, holds no wallet/keys, and does
+not authorize any on-chain action.
+
+---
+
+## 7. Storage Policy
+
+- GitHub Actions remains **artifact-only**.
+- `runtime/` is **local and git-ignored** (not committed).
+- DuckDB is **local VPS runtime storage** only.
+- **No automatic commit-back** of runtime history to the repo.
+- **No secrets, wallet, private key, or execution data** in DuckDB.
+- Current DB writes are limited to: runtime metadata, pipeline steps, strategy
+  observations, and optional risk flags.
+
+---
+
+## 8. Important Data / Report Outputs
 
 **Data:**
 - `data/pools_watchlist.csv`
@@ -76,7 +125,7 @@ fetch_meteora_pools.py
 
 ---
 
-## 7. Validation Commands
+## 9. Validation Commands
 
 ```bash
 python3 -m unittest tests/test_observe_strategy.py
@@ -86,7 +135,7 @@ python3 scripts/validate_watchlist.py
 
 ---
 
-## 8. VPS Status
+## 10. VPS Status
 
 - Tencent Lighthouse 2C2G
 - Swap 2GB enabled
@@ -98,7 +147,7 @@ python3 scripts/validate_watchlist.py
 
 ---
 
-## 9. Git Workflow
+## 11. Git Workflow
 
 - Work on feature branches
 - Use PRs
@@ -108,7 +157,7 @@ python3 scripts/validate_watchlist.py
 
 ---
 
-## 10. Current Observation Meaning
+## 12. Current Observation Meaning
 
 Observation readiness means **stable enough for future paper-simulation consideration only**.
 
@@ -116,18 +165,33 @@ Observation readiness means **stable enough for future paper-simulation consider
 - It does **not** mean live ready.
 - It does **not** authorize LP, swap, wallet, signing, or execution.
 
+Runtime/storage safety clarifications:
+
+- **Observation import does not mean paper trading.**
+- **DB write does not mean execution.**
+- **The runner does not authorize live execution.**
+- No wallet / private key / signing / swap / LP / rebalance / live execution.
+
 ---
 
-## 11. Next Planned Work
+## 13. Next Planned Work
 
-- Decide observation storage policy: artifact-only vs commit-back vs DuckDB
+**Next decision:**
+Decide whether to integrate observation import into the runner as an optional flag, or keep
+observation import manual until scheduler design is settled.
+
+**Recommended next coding task (only after this checkpoint update is merged):**
+Add an optional runner flag — `--import-observations-db` or equivalent — so
+`run_readonly_pipeline.py` can optionally trigger the strategy-observations DuckDB import.
+
+**Still open:**
 - Set up a VPS scheduled runner later — not GitHub Actions as runtime
 - Add Telegram notification/control room later, read-only first
 - Complete Tailscale laptop setup before closing public SSH
 
 ---
 
-## 12. Operating Rule for Coding Agents
+## 14. Operating Rule for Coding Agents
 
 Before coding, agents must:
 
