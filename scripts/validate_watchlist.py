@@ -10,6 +10,7 @@ Exit code 0 = valid. Exit code 1 = ada error (dipakai GitHub Actions untuk gagal
 """
 
 import csv
+import json
 import sys
 from pathlib import Path
 
@@ -697,9 +698,205 @@ def validate_strategy_v2_csv():
     return 0
 
 
+OBS_JSONL_PATH = (Path(__file__).resolve().parent.parent / "data"
+                  / "observations" / "strategy_observations.jsonl")
+OBS_SUMMARY_CSV_PATH = (Path(__file__).resolve().parent.parent / "reports"
+                        / "observations" / "observation_summary.csv")
+
+# Field wajib tiap record observasi (selaras dengan output observe_strategy.py).
+OBS_REQUIRED_FIELDS = [
+    "run_id", "observed_at_utc", "pair_label", "pair_key",
+    "representative_pool_address", "ohlcv_status", "ohlcv_volatility_bucket",
+    "pair_score_total_v1", "strategy_class_v2", "pair_score_v2_core",
+    "pair_score_v2_tactical", "pair_status_v2", "risk_flag_count", "risk_flags",
+    "test_lane", "live_eligibility", "minimum_observation_days",
+    "required_capability", "v2_classification_reason",
+]
+OBS_ALLOWED_CLASS = {"CORE", "TACTICAL", "REJECT", "NOT_EVALUATED"}
+OBS_ALLOWED_LIVE_ELIGIBILITY = {"NOT_EVALUATED", "OBSERVE_ONLY",
+                                "PAPER_TEST_ALLOWED", "NOT_LIVE_ELIGIBLE"}
+# observation_ready=True HANYA boleh berarti status ini — tidak ada makna lain.
+OBS_READY_ONLY_STATUS = "OBSERVATION_READY_FOR_FUTURE_PAPER_CONSIDERATION"
+# Kolom minimal yang wajib ada di summary CSV.
+OBS_SUMMARY_REQUIRED_COLS = ["pair_key", "latest_pair_label", "latest_class",
+                             "observation_ready", "observation_status", "reason"]
+# Prefiks terlarang: LIVE_ELIGIBLE_* tidak boleh muncul di mana pun (fase PAPER_ONLY).
+# Catatan: 'NOT_LIVE_ELIGIBLE' tidak memuat 'LIVE_ELIGIBLE_' (tanpa underscore akhir),
+# jadi nilai sah itu tidak kena false-positive.
+OBS_FORBIDDEN_LIVE_PREFIX = "LIVE_ELIGIBLE_"
+
+
+def validate_observations():
+    """Validasi JSONL observasi + summary CSV (Paper Observation Readiness v0.1).
+
+    Output observasi murni screening: tidak boleh menyiratkan kesiapan live, LP,
+    wallet, atau izin eksekusi. Exit code 0/1. Dilewati (0) jika belum dijalankan.
+    """
+    print("\n" + "=" * 60)
+    print("  PAPER OBSERVATION READINESS VALIDATION")
+    print("=" * 60)
+    if not OBS_JSONL_PATH.exists():
+        print(f"  CATATAN: {OBS_JSONL_PATH.name} belum ada "
+              f"(jalankan observe_strategy.py).")
+        print("  Dilewati — bukan error jika belum dijalankan.")
+        return 0
+
+    errors = []
+
+    # --- 1) JSONL valid baris-per-baris, lalu cek isi tiap record ---
+    n_records = 0
+    with OBS_JSONL_PATH.open(encoding="utf-8") as f:
+        for line_no, line in enumerate(f, start=1):
+            s = line.strip()
+            if not s:
+                continue
+            try:
+                rec = json.loads(s)
+            except json.JSONDecodeError as exc:
+                errors.append(f"JSONL baris {line_no}: JSON tidak valid ({exc})")
+                continue
+            if not isinstance(rec, dict):
+                errors.append(f"JSONL baris {line_no}: record bukan objek JSON")
+                continue
+            n_records += 1
+
+            missing = [c for c in OBS_REQUIRED_FIELDS if c not in rec]
+            if missing:
+                errors.append(f"JSONL baris {line_no}: field wajib hilang: {missing}")
+                continue
+
+            def g(k):
+                return str(rec.get(k, "")).strip()
+
+            # pair_key tidak boleh kosong
+            if not g("pair_key"):
+                errors.append(f"JSONL baris {line_no}: pair_key kosong")
+
+            # enum strategy_class_v2
+            cls = g("strategy_class_v2")
+            if cls not in OBS_ALLOWED_CLASS:
+                errors.append(f"JSONL baris {line_no}: strategy_class_v2='{cls}' "
+                              f"tidak valid (boleh: {sorted(OBS_ALLOWED_CLASS)})")
+
+            # enum live_eligibility
+            le = g("live_eligibility")
+            if le not in OBS_ALLOWED_LIVE_ELIGIBILITY:
+                errors.append(f"JSONL baris {line_no}: live_eligibility='{le}' "
+                              f"tidak valid (boleh: "
+                              f"{sorted(OBS_ALLOWED_LIVE_ELIGIBILITY)})")
+
+            # LIVE_ELIGIBLE_* dilarang muncul di field mana pun
+            for k, v in rec.items():
+                if OBS_FORBIDDEN_LIVE_PREFIX in str(v):
+                    errors.append(f"JSONL baris {line_no}: term LIVE_ELIGIBLE_* "
+                                  f"terdeteksi di field '{k}' (dilarang di fase ini)")
+
+            # required_capability tidak boleh kemampuan eksekusi/wallet/LP/sign/swap
+            cap = g("required_capability").upper()
+            if any(tok in cap for tok in STRATEGY_V2_FORBIDDEN_CAP):
+                errors.append(f"JSONL baris {line_no}: required_capability='{cap}' "
+                              f"mengandung kemampuan terlarang (live/LP/wallet/eksekusi)")
+
+            flags_str = g("risk_flags")
+            tokens = set(t for t in flags_str.split("|") if t and t != "none")
+
+            # label cacat wajib menandai MALFORMED_PAIR_LABEL
+            if is_malformed_pair_label(g("pair_label")):
+                if "MALFORMED_PAIR_LABEL" not in tokens:
+                    errors.append(f"JSONL baris {line_no}: pair_label "
+                                  f"'{g('pair_label')}' cacat tetapi "
+                                  f"MALFORMED_PAIR_LABEL tidak ada di risk_flags")
+
+            # MALFORMED_PAIR_LABEL -> live_eligibility wajib NOT_LIVE_ELIGIBLE/NOT_EVALUATED
+            if "MALFORMED_PAIR_LABEL" in tokens:
+                if le not in ("NOT_LIVE_ELIGIBLE", "NOT_EVALUATED"):
+                    errors.append(f"JSONL baris {line_no}: MALFORMED_PAIR_LABEL "
+                                  f"tetapi live_eligibility='{le}' (wajib "
+                                  f"NOT_LIVE_ELIGIBLE atau NOT_EVALUATED)")
+
+    if n_records == 0:
+        errors.append("JSONL observasi tidak memuat record valid.")
+
+    # --- 2) Summary CSV: kolom wajib + makna observation_ready ---
+    if not OBS_SUMMARY_CSV_PATH.exists():
+        errors.append(f"summary CSV hilang: {OBS_SUMMARY_CSV_PATH.name}")
+    else:
+        with OBS_SUMMARY_CSV_PATH.open(newline="", encoding="utf-8") as f:
+            rows = list(csv.reader(f))
+        if not rows:
+            errors.append("summary CSV kosong.")
+        else:
+            header = rows[0]
+            data_rows = rows[1:]
+            ncols = len(header)
+            missing_cols = [c for c in OBS_SUMMARY_REQUIRED_COLS if c not in header]
+            if missing_cols:
+                errors.append(f"summary CSV kolom wajib hilang: {missing_cols}")
+            else:
+                sidx = {name: header.index(name) for name in header}
+                for i, row in enumerate(data_rows, start=2):
+                    if len(row) != ncols:
+                        errors.append(f"summary baris {i}: jumlah kolom {len(row)} "
+                                      f"!= header {ncols}")
+                        continue
+
+                    def gs(col):
+                        return row[sidx[col]].strip()
+
+                    # LIVE_ELIGIBLE_* dilarang di kolom mana pun
+                    for col in header:
+                        if OBS_FORBIDDEN_LIVE_PREFIX in row[sidx[col]]:
+                            errors.append(f"summary baris {i}: term LIVE_ELIGIBLE_* "
+                                          f"di kolom '{col}' (dilarang di fase ini)")
+
+                    ready = gs("observation_ready")
+                    status = gs("observation_status")
+                    # observation_ready=True HANYA boleh berarti status aman ini.
+                    if ready == "True" and status != OBS_READY_ONLY_STATUS:
+                        errors.append(f"summary baris {i}: observation_ready=True "
+                                      f"tetapi observation_status='{status}' (hanya "
+                                      f"boleh {OBS_READY_ONLY_STATUS})")
+                    # Sebaliknya: status ready hanya jika observation_ready=True.
+                    if status == OBS_READY_ONLY_STATUS and ready != "True":
+                        errors.append(f"summary baris {i}: observation_status="
+                                      f"{OBS_READY_ONLY_STATUS} tetapi "
+                                      f"observation_ready='{ready}' (harus True)")
+                    # latest_class harus enum sah
+                    lc = gs("latest_class")
+                    if lc not in OBS_ALLOWED_CLASS:
+                        errors.append(f"summary baris {i}: latest_class='{lc}' "
+                                      f"tidak valid (boleh: {sorted(OBS_ALLOWED_CLASS)})")
+                    # pair_key tidak boleh kosong
+                    if not gs("pair_key"):
+                        errors.append(f"summary baris {i}: pair_key kosong")
+                    # latest_required_capability (jika ada) tidak boleh kemampuan terlarang
+                    if "latest_required_capability" in sidx:
+                        cap = gs("latest_required_capability").upper()
+                        if any(tok in cap for tok in STRATEGY_V2_FORBIDDEN_CAP):
+                            errors.append(f"summary baris {i}: "
+                                          f"latest_required_capability='{cap}' "
+                                          f"mengandung kemampuan terlarang")
+
+    print(f"  JSONL : {OBS_JSONL_PATH.name} ({n_records} record)")
+    print(f"  CSV   : {OBS_SUMMARY_CSV_PATH.name}")
+    print("-" * 60)
+    if errors:
+        print(f"  GAGAL — {len(errors)} error:")
+        for e in errors[:20]:
+            print(f"    x {e}")
+        print("  HASIL: TIDAK VALID")
+        return 1
+    print("  Semua pemeriksaan observasi lolos.")
+    print("  Observasi = pertimbangan paper-simulasi masa depan saja; "
+          "bukan live/LP/wallet/eksekusi.")
+    print("  HASIL: VALID")
+    return 0
+
+
 if __name__ == "__main__":
     rc_pool = validate()
     rc_pair = validate_pair_csv()
     rc_ohlcv = validate_ohlcv_csv()
     rc_strat = validate_strategy_v2_csv()
-    sys.exit(rc_pool or rc_pair or rc_ohlcv or rc_strat)
+    rc_obs = validate_observations()
+    sys.exit(rc_pool or rc_pair or rc_ohlcv or rc_strat or rc_obs)
