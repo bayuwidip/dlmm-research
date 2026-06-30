@@ -8,6 +8,9 @@ data/raw/
 reports/latest_pool_report.md
 logs/
 
+# Runtime orchestrator output (logs, locks, run summaries — regenerated per run)
+runtime/
+
 # Python
 __pycache__/
 
