@@ -14,6 +14,9 @@ name: Collect and Validate
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - main
   schedule:
     - cron: "0 1 * * *"   # sekali sehari, 01:00 UTC
 
@@ -57,6 +60,21 @@ jobs:
       - name: Strategy Classification v0.2
         run: python scripts/classify_strategy.py
 
+      # Paper Observation Readiness v0.1: transformasi CSV murni (stdlib, tanpa
+      # jaringan). Membaca data/strategy_classification_v2.csv dan menulis
+      # data/observations/ + reports/observations/. Observe-only / PAPER_ONLY —
+      # tidak ada eksekusi, tidak ada LIVE_ELIGIBLE_*. TIDAK pakai
+      # continue-on-error: kegagalan di sini = bug nyata, bukan jaringan transien.
+      - name: Paper Observation Readiness v0.1
+        run: python scripts/observe_strategy.py
+
+      # Unit tests untuk transformasi klasifikasi + observasi. Murni stdlib,
+      # tanpa jaringan; menggerbangi logika sebelum validasi gate.
+      - name: Unit tests (classification + observation)
+        run: |
+          python -m unittest tests/test_classify_strategy.py
+          python -m unittest tests/test_observe_strategy.py
+
       - name: Validate watchlist
         run: python scripts/validate_watchlist.py
 
@@ -71,9 +89,11 @@ jobs:
             data/pair_watchlist.csv
             data/ohlcv_top_pairs.csv
             data/strategy_classification_v2.csv
+            data/observations/
             reports/latest_pool_report.md
             reports/ohlcv_report.md
             reports/strategy_classification_v2.md
+            reports/observations/
             logs/*.log
           if-no-files-found: warn
           retention-days: 14
