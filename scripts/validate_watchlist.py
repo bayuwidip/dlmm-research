@@ -893,10 +893,243 @@ def validate_observations():
     return 0
 
 
+RISK_DECISIONS_CSV_PATH = (Path(__file__).resolve().parent.parent / "data"
+                           / "risk_decisions.csv")
+RISK_DECISIONS_REPORT_PATH = (Path(__file__).resolve().parent.parent / "reports"
+                              / "risk_decisions.md")
+# Keberadaan layer risk policy: jika skrip ini ada, output CSV-nya WAJIB ada.
+RISK_POLICY_SCRIPT_PATH = (Path(__file__).resolve().parent.parent / "scripts"
+                           / "apply_risk_policy.py")
+
+# Kolom wajib output Risk Policy Engine Skeleton v0.1 (apply_risk_policy.py).
+RISK_REQUIRED_COLUMNS = [
+    "pair_key", "pair_label", "strategy_class_v2", "pair_status_v2",
+    "test_lane", "live_eligibility", "required_capability",
+    "risk_flag_count", "risk_flags",
+    "risk_decision", "risk_action", "max_allowed_action",
+    "risk_blockers", "risk_warnings", "risk_required_next_step",
+    "risk_policy_reason", "safety_phase",
+]
+
+# Enum keluaran yang diizinkan (engine hanya boleh memancarkan nilai ini).
+RISK_ALLOWED_DECISION = {"BLOCKED", "OBSERVE_ONLY", "PAPER_REVIEW_CANDIDATE",
+                         "NOT_EVALUATED", "REJECTED"}
+RISK_ALLOWED_ACTION = {"NO_ACTION", "CONTINUE_OBSERVATION",
+                       "REVIEW_FOR_FUTURE_PAPER_SIMULATION",
+                       "FIX_DATA_OR_CLASSIFICATION", "REJECT"}
+RISK_ALLOWED_MAX = {"NONE", "OBSERVE_ONLY", "FUTURE_PAPER_SIMULATION_REVIEW"}
+
+# safety_phase wajib SAMA PERSIS dengan ini.
+RISK_SAFETY_PHASE = "READ_ONLY / RESEARCH_ONLY / SCREENING_ONLY / PAPER_ONLY"
+
+# Token otorisasi-eksekusi yang DILARANG muncul di sel CSV mana pun (case-sensitive;
+# bentuk uppercase identifier, bukan prosa). 'execution'/'paper entry' (huruf kecil/
+# spasi) dalam catatan tidak kena karena tokennya uppercase+underscore.
+# Catatan: 'LIVE_ELIGIBLE' ditangani terpisah agar 'NOT_LIVE_ELIGIBLE' (negasi,
+# nilai sah) tidak jadi false-positive.
+RISK_FORBIDDEN_TOKENS = ("LIVE_ENTRY", "PAPER_ENTRY", "EXECUTE", "WALLET",
+                         "PRIVATE_KEY", "SIGNING", "SWAP", "LP_ACTION",
+                         "REBALANCE")
+# LIVE_ELIGIBLE_<size> (grant live) dilarang di mana pun. 'NOT_LIVE_ELIGIBLE'
+# tidak memuat trailing underscore sehingga lolos.
+RISK_FORBIDDEN_LIVE_PREFIX = "LIVE_ELIGIBLE_"
+
+# Flag yang, jika ada, mewajibkan keputusan BLOCKED/REJECTED + max NONE.
+RISK_HARDBLOCK_FLAGS = ("MALFORMED_PAIR_LABEL", "BLACKLISTED")
+
+
+def _risk_live_eligible_grant(value):
+    """True jika nilai live_eligibility adalah GRANT live (dilarang).
+
+    'NOT_LIVE_ELIGIBLE' adalah negasi yang sah dan TIDAK dianggap grant,
+    walaupun memuat substring 'LIVE_ELIGIBLE'.
+    """
+    v = (value or "").strip()
+    if v == "NOT_LIVE_ELIGIBLE":
+        return False
+    return "LIVE_ELIGIBLE" in v
+
+
+def validate_risk_decisions(path=None):
+    """Validasi output Risk Policy Engine Skeleton v0.1 (data/risk_decisions.csv).
+
+    Gate keselamatan-saja: memastikan keputusan risiko tetap dalam batas
+    READ_ONLY/PAPER_ONLY dan tidak ada otorisasi eksekusi/wallet/LP/swap/live.
+    Tidak membuat posisi, tidak menghasilkan sinyal, tidak mengeksekusi apa pun.
+
+    Exit code 0/1. Jika file hilang TETAPI layer risk policy sudah ada
+    (scripts/apply_risk_policy.py), itu dianggap GAGAL (output wajib hadir).
+    """
+    csv_path = Path(path) if path is not None else RISK_DECISIONS_CSV_PATH
+
+    print("\n" + "=" * 60)
+    print("  RISK DECISIONS VALIDATION")
+    print("=" * 60)
+
+    if not csv_path.exists():
+        if RISK_POLICY_SCRIPT_PATH.exists():
+            print(f"  GAGAL: {csv_path.name} hilang padahal layer risk policy "
+                  f"({RISK_POLICY_SCRIPT_PATH.name}) sudah ada.")
+            print("  Jalankan apply_risk_policy.py untuk menghasilkan output.")
+            print("  HASIL: TIDAK VALID")
+            return 1
+        print(f"  CATATAN: {csv_path.name} belum ada dan layer risk policy "
+              f"belum ada. Dilewati.")
+        return 0
+
+    errors = []
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        rows = list(csv.reader(f))
+    if not rows:
+        print("  FATAL: risk decisions CSV kosong.")
+        return 1
+
+    header = rows[0]
+    data_rows = rows[1:]
+    ncols = len(header)
+
+    missing = [c for c in RISK_REQUIRED_COLUMNS if c not in header]
+    if missing:
+        print(f"  GAGAL: kolom wajib hilang: {missing}")
+        print("  HASIL: TIDAK VALID")
+        return 1
+
+    if not data_rows:
+        print("  FATAL: risk decisions CSV tidak punya baris data (hanya header).")
+        return 1
+
+    idx = {name: header.index(name) for name in header}
+    for i, row in enumerate(data_rows, start=2):
+        if len(row) != ncols:
+            errors.append(f"baris {i}: jumlah kolom {len(row)} != header {ncols}")
+            continue
+
+        def get(col):
+            return row[idx[col]].strip()
+
+        decision = get("risk_decision")
+        action = get("risk_action")
+        maxa = get("max_allowed_action")
+        le = get("live_eligibility")
+        flags_str = get("risk_flags")
+        flags = set(t for t in flags_str.split("|") if t and t != "none")
+
+        # 1) Enum keputusan/aksi/max wajib sah.
+        if decision not in RISK_ALLOWED_DECISION:
+            errors.append(f"baris {i}: risk_decision='{decision}' tidak valid "
+                          f"(boleh: {sorted(RISK_ALLOWED_DECISION)})")
+        if action not in RISK_ALLOWED_ACTION:
+            errors.append(f"baris {i}: risk_action='{action}' tidak valid "
+                          f"(boleh: {sorted(RISK_ALLOWED_ACTION)})")
+        if maxa not in RISK_ALLOWED_MAX:
+            errors.append(f"baris {i}: max_allowed_action='{maxa}' tidak valid "
+                          f"(boleh: {sorted(RISK_ALLOWED_MAX)})")
+
+        # 2) safety_phase wajib sama persis.
+        sp = get("safety_phase")
+        if sp != RISK_SAFETY_PHASE:
+            errors.append(f"baris {i}: safety_phase='{sp}' tidak sama persis "
+                          f"dengan '{RISK_SAFETY_PHASE}'")
+
+        # 3) Token otorisasi terlarang tidak boleh muncul di sel mana pun.
+        for col in header:
+            cell = row[idx[col]]
+            for tok in RISK_FORBIDDEN_TOKENS:
+                if tok in cell:
+                    errors.append(f"baris {i}: token terlarang '{tok}' di kolom "
+                                  f"'{col}' (otorisasi eksekusi dilarang)")
+            if RISK_FORBIDDEN_LIVE_PREFIX in cell:
+                errors.append(f"baris {i}: '{RISK_FORBIDDEN_LIVE_PREFIX}*' di kolom "
+                              f"'{col}' (grant live dilarang)")
+
+        # 4) live_eligibility tidak boleh GRANT live (NOT_LIVE_ELIGIBLE sah).
+        if _risk_live_eligible_grant(le):
+            errors.append(f"baris {i}: live_eligibility='{le}' adalah grant live "
+                          f"(DILARANG di fase ini)")
+
+        # 5) PAPER_REVIEW_CANDIDATE: future paper-simulation REVIEW only.
+        if decision == "PAPER_REVIEW_CANDIDATE":
+            if action != "REVIEW_FOR_FUTURE_PAPER_SIMULATION":
+                errors.append(f"baris {i}: PAPER_REVIEW_CANDIDATE tetapi "
+                              f"risk_action='{action}' (wajib "
+                              f"REVIEW_FOR_FUTURE_PAPER_SIMULATION)")
+            if maxa != "FUTURE_PAPER_SIMULATION_REVIEW":
+                errors.append(f"baris {i}: PAPER_REVIEW_CANDIDATE tetapi "
+                              f"max_allowed_action='{maxa}' (wajib "
+                              f"FUTURE_PAPER_SIMULATION_REVIEW)")
+            justif = (get("risk_policy_reason") + " "
+                      + get("risk_required_next_step")).upper()
+            if not ("FUTURE" in justif and "PAPER" in justif
+                    and ("SIMULATION" in justif or "REVIEW" in justif)):
+                errors.append(f"baris {i}: PAPER_REVIEW_CANDIDATE tetapi "
+                              f"risk_policy_reason/risk_required_next_step tidak "
+                              f"menegaskan 'future paper-simulation review only'")
+
+        # 6) OBSERVE_ONLY: max OBSERVE_ONLY, aksi CONTINUE_OBSERVATION.
+        if decision == "OBSERVE_ONLY":
+            if maxa != "OBSERVE_ONLY":
+                errors.append(f"baris {i}: OBSERVE_ONLY tetapi max_allowed_action="
+                              f"'{maxa}' (wajib OBSERVE_ONLY)")
+            if action != "CONTINUE_OBSERVATION":
+                errors.append(f"baris {i}: OBSERVE_ONLY tetapi risk_action='{action}' "
+                              f"(wajib CONTINUE_OBSERVATION)")
+
+        # 7) NOT_EVALUATED: max NONE, aksi NO_ACTION.
+        if decision == "NOT_EVALUATED":
+            if maxa != "NONE":
+                errors.append(f"baris {i}: NOT_EVALUATED tetapi max_allowed_action="
+                              f"'{maxa}' (wajib NONE)")
+            if action != "NO_ACTION":
+                errors.append(f"baris {i}: NOT_EVALUATED tetapi risk_action='{action}' "
+                              f"(wajib NO_ACTION)")
+
+        # 8) REJECTED/BLOCKED: max NONE, tidak reviewable, aksi REJECT/FIX.
+        if decision in ("REJECTED", "BLOCKED"):
+            if maxa != "NONE":
+                errors.append(f"baris {i}: {decision} tetapi max_allowed_action="
+                              f"'{maxa}' (wajib NONE — tidak boleh reviewable)")
+            if action not in ("REJECT", "FIX_DATA_OR_CLASSIFICATION"):
+                errors.append(f"baris {i}: {decision} tetapi risk_action='{action}' "
+                              f"(wajib REJECT atau FIX_DATA_OR_CLASSIFICATION)")
+
+        # 9) Flag keras (MALFORMED_PAIR_LABEL/BLACKLISTED) -> BLOCKED/REJECTED + NONE.
+        hard = [fl for fl in RISK_HARDBLOCK_FLAGS if fl in flags]
+        if hard:
+            if decision not in ("BLOCKED", "REJECTED"):
+                errors.append(f"baris {i}: risk_flags memuat {hard} tetapi "
+                              f"risk_decision='{decision}' (wajib BLOCKED/REJECTED)")
+            if maxa != "NONE":
+                errors.append(f"baris {i}: risk_flags memuat {hard} tetapi "
+                              f"max_allowed_action='{maxa}' (wajib NONE)")
+
+    # Catatan keselamatan opsional di report (jika report ada).
+    if RISK_DECISIONS_REPORT_PATH.exists():
+        rep_text = RISK_DECISIONS_REPORT_PATH.read_text(encoding="utf-8")
+        if "does not authorize" not in rep_text:
+            errors.append(f"{RISK_DECISIONS_REPORT_PATH.name}: catatan "
+                          f"non-otorisasi ('does not authorize') tidak ditemukan")
+
+    print(f"  File  : {csv_path.name}")
+    print(f"  Baris : {len(data_rows)}")
+    print("-" * 60)
+    if errors:
+        print(f"  GAGAL — {len(errors)} error:")
+        for e in errors[:20]:
+            print(f"    x {e}")
+        print("  HASIL: TIDAK VALID")
+        return 1
+    print("  Semua pemeriksaan risk decisions lolos.")
+    print("  Risk engine = veto-only; tidak ada otorisasi eksekusi/wallet/LP/"
+          "swap/live.")
+    print("  HASIL: VALID")
+    return 0
+
+
 if __name__ == "__main__":
     rc_pool = validate()
     rc_pair = validate_pair_csv()
     rc_ohlcv = validate_ohlcv_csv()
     rc_strat = validate_strategy_v2_csv()
     rc_obs = validate_observations()
-    sys.exit(rc_pool or rc_pair or rc_ohlcv or rc_strat or rc_obs)
+    rc_risk = validate_risk_decisions()
+    sys.exit(rc_pool or rc_pair or rc_ohlcv or rc_strat or rc_obs or rc_risk)
