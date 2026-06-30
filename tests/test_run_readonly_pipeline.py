@@ -255,6 +255,7 @@ class PipelineBehaviorTests(unittest.TestCase):
             (rop.OHLCV_STEP_NAME, ["python3", "scripts/fetch_ohlcv_top_pairs.py"]),
             ("classify_strategy", ["python3", "scripts/classify_strategy.py"]),
             ("observe_strategy", ["python3", "scripts/observe_strategy.py"]),
+            (rop.RISK_POLICY_STEP_NAME, ["python3", "scripts/apply_risk_policy.py"]),
             (rop.VALIDATE_STEP_NAME, ["python3", "scripts/validate_watchlist.py"]),
         ]
 
@@ -279,6 +280,7 @@ class PipelineBehaviorTests(unittest.TestCase):
         # Steps after OHLCV still executed.
         self.assertIn("classify_strategy", runner.calls)
         self.assertIn("observe_strategy", runner.calls)
+        self.assertIn(rop.RISK_POLICY_STEP_NAME, runner.calls)
         self.assertIn(rop.VALIDATE_STEP_NAME, runner.calls)
 
     def test_ohlcv_failure_fails_when_flag_false(self):
@@ -299,6 +301,115 @@ class PipelineBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "SUCCESS")
         self.assertEqual(len(outcome.steps), len(self._steps()))
+
+
+class DefaultStepsOrderTests(unittest.TestCase):
+    """The default pipeline must include apply_risk_policy in the right slot."""
+
+    def test_default_steps_include_risk_policy_in_correct_order(self):
+        names = [name for name, _ in rop.build_default_steps()]
+        self.assertIn(rop.RISK_POLICY_STEP_NAME, names)
+        # apply_risk_policy runs AFTER observe_strategy and BEFORE validate.
+        self.assertEqual(
+            names,
+            [
+                "fetch_meteora_pools",
+                "build_watchlist",
+                rop.OHLCV_STEP_NAME,
+                "classify_strategy",
+                "observe_strategy",
+                rop.RISK_POLICY_STEP_NAME,
+                rop.VALIDATE_STEP_NAME,
+            ],
+        )
+        self.assertLess(
+            names.index("observe_strategy"), names.index(rop.RISK_POLICY_STEP_NAME)
+        )
+        self.assertLess(
+            names.index(rop.RISK_POLICY_STEP_NAME), names.index(rop.VALIDATE_STEP_NAME)
+        )
+        # validate_watchlist remains the final step.
+        self.assertEqual(names[-1], rop.VALIDATE_STEP_NAME)
+
+    def test_default_risk_policy_step_invokes_apply_risk_policy(self):
+        steps = dict(rop.build_default_steps())
+        command = steps[rop.RISK_POLICY_STEP_NAME]
+        self.assertIn("scripts/apply_risk_policy.py", command)
+
+    def test_dry_run_lists_risk_policy_step_in_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = rop.main(
+                    [
+                        "--dry-run",
+                        "--log-dir", str(Path(tmp) / "logs"),
+                        "--lock-dir", str(Path(tmp) / "locks"),
+                        "--summary-dir", str(Path(tmp) / "summaries"),
+                    ]
+                )
+            self.assertEqual(rc, 0)
+            out = buf.getvalue()
+            self.assertIn(rop.RISK_POLICY_STEP_NAME, out)
+            self.assertIn("scripts/apply_risk_policy.py", out)
+            # Order is preserved in the printed plan.
+            self.assertLess(
+                out.index("observe_strategy"), out.index(rop.RISK_POLICY_STEP_NAME)
+            )
+            self.assertLess(
+                out.index(rop.RISK_POLICY_STEP_NAME),
+                out.index(rop.VALIDATE_STEP_NAME),
+            )
+            # Dry run still creates nothing.
+            self.assertFalse((Path(tmp) / "logs").exists())
+            self.assertFalse((Path(tmp) / "locks").exists())
+            self.assertFalse((Path(tmp) / "summaries").exists())
+
+
+class RiskPolicyStepFailureTests(unittest.TestCase):
+    """apply_risk_policy is never continue-on-error; its failure fails the run."""
+
+    def test_risk_policy_failure_fails_runner_and_stops_validate(self):
+        steps = PipelineBehaviorTests._steps(PipelineBehaviorTests())
+        runner = fake_runner_factory({rop.RISK_POLICY_STEP_NAME: 1})
+        outcome = rop.run_pipeline(
+            steps, runner, continue_on_ohlcv_error=False, now_fn=FakeClock()
+        )
+        self.assertEqual(outcome.status, "FAILED")
+        # Risk policy ran and failed; validate never ran (pipeline stopped).
+        self.assertIn(rop.RISK_POLICY_STEP_NAME, runner.calls)
+        self.assertNotIn(rop.VALIDATE_STEP_NAME, runner.calls)
+        self.assertEqual(outcome.steps[-1].name, rop.RISK_POLICY_STEP_NAME)
+        self.assertEqual(outcome.steps[-1].exit_code, 1)
+
+    def test_risk_policy_failure_unaffected_by_continue_on_ohlcv_error(self):
+        steps = PipelineBehaviorTests._steps(PipelineBehaviorTests())
+        runner = fake_runner_factory({rop.RISK_POLICY_STEP_NAME: 1})
+        # Even with the OHLCV toleration flag set, the risk policy failure is
+        # NOT tolerated: only the OHLCV step is ever continue-on-error.
+        outcome = rop.run_pipeline(
+            steps, runner, continue_on_ohlcv_error=True, now_fn=FakeClock()
+        )
+        self.assertEqual(outcome.status, "FAILED")
+        self.assertFalse(outcome.ohlcv_error_tolerated)
+        self.assertIn(rop.RISK_POLICY_STEP_NAME, runner.calls)
+        self.assertNotIn(rop.VALIDATE_STEP_NAME, runner.calls)
+
+    def test_risk_policy_runs_after_observe_and_before_validate(self):
+        steps = PipelineBehaviorTests._steps(PipelineBehaviorTests())
+        runner = fake_runner_factory({})
+        outcome = rop.run_pipeline(
+            steps, runner, continue_on_ohlcv_error=False, now_fn=FakeClock()
+        )
+        self.assertEqual(outcome.status, "SUCCESS")
+        self.assertLess(
+            runner.calls.index("observe_strategy"),
+            runner.calls.index(rop.RISK_POLICY_STEP_NAME),
+        )
+        self.assertLess(
+            runner.calls.index(rop.RISK_POLICY_STEP_NAME),
+            runner.calls.index(rop.VALIDATE_STEP_NAME),
+        )
 
 
 class ExecuteRunIntegrationTests(unittest.TestCase):
@@ -603,6 +714,36 @@ class WriteDbRealDuckDbTests(unittest.TestCase):
             self.assertEqual(counts["steps"], len(_ok_steps()))
             summary = _read_summary_json(args.summary_dir)
             self.assertEqual(summary["db_write_status"], rop.DB_WRITE_SUCCESS)
+
+    def test_default_steps_import_pipeline_steps_including_risk_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._init_db(tmp)
+            args = make_args(tmp, write_db=str(db_path))
+            steps = rop.build_default_steps()
+            with redirect_stdout(io.StringIO()):
+                rc = rop.execute_run(
+                    args, steps=steps, step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            self.assertEqual(rc, 0)
+            counts = self._counts(db_path)
+            self.assertEqual(counts["runs"], 1)
+            # All 7 default steps recorded, including apply_risk_policy.
+            self.assertEqual(counts["steps"], len(steps))
+            conn = duckdb.connect(str(db_path))
+            try:
+                step_names = [
+                    r[0]
+                    for r in conn.execute(
+                        "SELECT step_name FROM pipeline_steps"
+                    ).fetchall()
+                ]
+            finally:
+                conn.close()
+            self.assertIn(rop.RISK_POLICY_STEP_NAME, step_names)
+            self.assertIn(rop.VALIDATE_STEP_NAME, step_names)
+            # No execution-layer table is ever written.
+            self.assertEqual(counts["fpe"], 0)
 
     def test_failed_run_imports_summary_but_exits_nonzero(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1092,6 +1233,42 @@ class ImportObservationsRealDuckDbTests(unittest.TestCase):
                     now_fn=FakeClock(),
                 )
             self.assertEqual(self._counts(db_path)["fpe"], 0)
+
+    def test_observation_import_works_with_default_seven_step_pipeline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._init_db(tmp)
+            obs = _write_observations_jsonl(tmp)
+            args = make_args(
+                tmp, write_db=str(db_path), import_observations_db=True,
+                observations_jsonl=str(obs), import_risk_flags=True,
+            )
+            steps = rop.build_default_steps()
+            with redirect_stdout(io.StringIO()):
+                rc = rop.execute_run(
+                    args, steps=steps, step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            self.assertEqual(rc, 0)
+            counts = self._counts(db_path)
+            # Run summary still imports all 7 steps (including apply_risk_policy).
+            self.assertEqual(counts["steps"], len(steps))
+            # Observation import behavior is unchanged by the added step.
+            self.assertEqual(counts["obs"], 1)
+            self.assertGreaterEqual(counts["flags"], 1)
+            # Hard boundary holds: no execution-layer rows, no risk_decisions
+            # import (the runner does not import risk_decisions yet).
+            self.assertEqual(counts["fpe"], 0)
+            conn = duckdb.connect(str(db_path))
+            try:
+                step_names = [
+                    r[0]
+                    for r in conn.execute(
+                        "SELECT step_name FROM pipeline_steps"
+                    ).fetchall()
+                ]
+            finally:
+                conn.close()
+            self.assertIn(rop.RISK_POLICY_STEP_NAME, step_names)
 
     def test_risk_flags_not_written_without_flag(self):
         with tempfile.TemporaryDirectory() as tmp:

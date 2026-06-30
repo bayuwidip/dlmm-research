@@ -65,6 +65,7 @@ SAFETY_BANNER = (
 )
 
 OHLCV_STEP_NAME = "fetch_ohlcv_top_pairs"
+RISK_POLICY_STEP_NAME = "apply_risk_policy"
 VALIDATE_STEP_NAME = "validate_watchlist"
 
 LOCK_FILENAME = "pipeline.lock"
@@ -119,6 +120,12 @@ def build_default_steps() -> List[Tuple[str, List[str]]]:
         (OHLCV_STEP_NAME, [py, "scripts/fetch_ohlcv_top_pairs.py"]),
         ("classify_strategy", [py, "scripts/classify_strategy.py"]),
         ("observe_strategy", [py, "scripts/observe_strategy.py"]),
+        # Risk Policy Engine (read-only, veto/reporting only). Runs AFTER
+        # observe_strategy and BEFORE validate_watchlist because the validator
+        # now validates data/risk_decisions.csv, so apply_risk_policy.py must
+        # produce it first. Never continue-on-error: a risk policy failure fails
+        # the runner.
+        (RISK_POLICY_STEP_NAME, [py, "scripts/apply_risk_policy.py"]),
         (VALIDATE_STEP_NAME, [py, "scripts/validate_watchlist.py"]),
     ]
 
