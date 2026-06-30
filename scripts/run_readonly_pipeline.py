@@ -84,6 +84,27 @@ DB_WRITE_FAILED = "FAILED"
 # Exact message required when --write-db points at a non-existent database.
 DB_MISSING_MSG = "DuckDB database not found. Run scripts/init_runtime_db.py first."
 
+# Optional strategy-observation import support (only active when
+# --import-observations-db is provided, which itself requires --write-db). The
+# runner NEVER creates the DB or the observations JSONL; it only imports an
+# already-written observations file into an EXISTING DB via the strategy
+# observations importer. DB writes stay limited to strategy_observations and
+# (optionally) risk_flags; future_position_events is never written.
+OBS_IMPORT_NOT_REQUESTED = "NOT_REQUESTED"
+OBS_IMPORT_PENDING = "PENDING"
+OBS_IMPORT_SUCCESS = "SUCCESS"
+OBS_IMPORT_FAILED = "FAILED"
+
+DEFAULT_OBSERVATIONS_JSONL = "data/observations/strategy_observations.jsonl"
+
+# Exact message required when --import-observations-db is requested without
+# --write-db (the importer needs an existing DB to write into).
+OBS_REQUIRES_DB_MSG = "--import-observations-db requires --write-db"
+
+# Message when the observations JSONL is missing but its import was requested.
+# The runner does not create the observations file; it fails rather than skip.
+OBS_MISSING_MSG = "Observations JSONL not found"
+
 
 def build_default_steps() -> List[Tuple[str, List[str]]]:
     """Return the ordered pipeline steps as (name, command-list) tuples.
@@ -351,6 +372,15 @@ def db_file_present(db_path) -> bool:
     return Path(db_path).is_file()
 
 
+def observations_file_present(observations_jsonl) -> bool:
+    """Return True only if observations_jsonl points to an existing regular file.
+
+    Pure filesystem check (stdlib only). It never creates the observations file
+    — the runner does not auto-create it.
+    """
+    return Path(observations_jsonl).is_file()
+
+
 def _load_importer():
     """Deferred import of scripts/import_run_summary_to_db.py.
 
@@ -363,6 +393,21 @@ def _load_importer():
         sys.path.insert(0, scripts_dir)
     import import_run_summary_to_db as importer  # noqa: PLC0415
     return importer
+
+
+def _load_observations_importer():
+    """Deferred import of scripts/import_strategy_observations_to_db.py.
+
+    Imported lazily (only when --import-observations-db is used) so a normal run
+    never depends on the observations importer module or on duckdb. The importer
+    itself defers its own duckdb import, so loading this module does not pull in
+    duckdb.
+    """
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import import_strategy_observations_to_db as obs_importer  # noqa: PLC0415
+    return obs_importer
 
 
 def import_run_summary_into_db(db_path, summary_json_path) -> str:
@@ -390,6 +435,33 @@ def import_run_summary_into_db(db_path, summary_json_path) -> str:
     return DB_WRITE_SUCCESS if rc == 0 else DB_WRITE_FAILED
 
 
+def import_observations_into_db(db_path, observations_jsonl, import_risk_flags) -> str:
+    """Import an EXISTING observations JSONL into an EXISTING DuckDB.
+
+    Reuses scripts/import_strategy_observations_to_db.py instead of duplicating
+    SQL, so the importer's guarantees hold: it writes ONLY to
+    strategy_observations and (only with import_risk_flags) risk_flags, and never
+    to pipeline_runs, pipeline_steps, or future_position_events. Imports with
+    upsert=True so re-importing the same observations is idempotent. Never creates
+    or initializes the database, and never creates the observations file.
+
+    Returns OBS_IMPORT_SUCCESS or OBS_IMPORT_FAILED. Does not raise.
+    """
+    try:
+        obs_importer = _load_observations_importer()
+        rc = obs_importer.run_import(
+            db_path=str(db_path),
+            observations_jsonl=str(observations_jsonl),
+            dry_run=False,
+            upsert=True,
+            import_risk_flags=import_risk_flags,
+        )
+    except Exception as exc:  # defensive: run_import normally returns a code
+        print(f"ERROR: observation DuckDB import failed: {exc}", file=sys.stderr)
+        return OBS_IMPORT_FAILED
+    return OBS_IMPORT_SUCCESS if rc == 0 else OBS_IMPORT_FAILED
+
+
 # --------------------------------------------------------------------------- #
 # Summary generation
 # --------------------------------------------------------------------------- #
@@ -404,6 +476,9 @@ def build_summary_dict(
     log_file: str,
     db_path: Optional[str] = None,
     db_write_status: str = DB_WRITE_NOT_REQUESTED,
+    observations_jsonl: Optional[str] = None,
+    observation_db_import_status: str = OBS_IMPORT_NOT_REQUESTED,
+    import_risk_flags: bool = False,
 ) -> dict:
     return {
         "run_id": run_id,
@@ -418,6 +493,9 @@ def build_summary_dict(
         "log_file": str(log_file),
         "db_path": db_path,
         "db_write_status": db_write_status,
+        "observations_jsonl": observations_jsonl,
+        "observation_db_import_status": observation_db_import_status,
+        "import_risk_flags": import_risk_flags,
         "steps": [s.to_dict() for s in outcome.steps],
     }
 
@@ -438,6 +516,22 @@ def build_summary_markdown(summary: dict, summary_json_path: str) -> str:
         f"- **DB write status:** {summary.get('db_write_status', DB_WRITE_NOT_REQUESTED)}"
     )
     lines.append(f"- **DB path:** {summary.get('db_path')}")
+    lines.append("")
+    lines.append("## DB Write Status")
+    lines.append("")
+    lines.append(f"- **DB path:** {summary.get('db_path')}")
+    lines.append(
+        "- **Run summary DB write status:** "
+        f"{summary.get('db_write_status', DB_WRITE_NOT_REQUESTED)}"
+    )
+    lines.append(
+        "- **Observation DB import status:** "
+        f"{summary.get('observation_db_import_status', OBS_IMPORT_NOT_REQUESTED)}"
+    )
+    lines.append(f"- **Observations JSONL:** {summary.get('observations_jsonl')}")
+    lines.append(
+        f"- **Risk flags imported:** {bool(summary.get('import_risk_flags', False))}"
+    )
     lines.append("")
     lines.append("## Safety Boundary")
     lines.append("")
@@ -531,6 +625,32 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
             "auto-created, auto-initialized, or written to without this flag."
         ),
     )
+    parser.add_argument(
+        "--import-observations-db",
+        action="store_true",
+        help=(
+            "After the run, also import the observations JSONL into the EXISTING "
+            "DuckDB (strategy_observations only; risk_flags too with "
+            "--import-risk-flags). Requires --write-db. Never writes "
+            "future_position_events; never creates the DB or the observations file."
+        ),
+    )
+    parser.add_argument(
+        "--observations-jsonl",
+        default=DEFAULT_OBSERVATIONS_JSONL,
+        help=(
+            "Path to the observation JSONL imported when --import-observations-db "
+            f"is set (default: {DEFAULT_OBSERVATIONS_JSONL})."
+        ),
+    )
+    parser.add_argument(
+        "--import-risk-flags",
+        action="store_true",
+        help=(
+            "With --import-observations-db, also derive and import risk_flags rows "
+            "from each observation."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -544,11 +664,17 @@ def print_dry_run(steps: List[Tuple[str, List[str]]], args: argparse.Namespace) 
         print(f"  {i}. {name}: {' '.join(command)}")
     print()
     write_db = getattr(args, "write_db", None)
+    import_obs = getattr(args, "import_observations_db", False)
+    observations_jsonl = getattr(args, "observations_jsonl", DEFAULT_OBSERVATIONS_JSONL)
+    import_risk_flags = getattr(args, "import_risk_flags", False)
     print(f"continue_on_ohlcv_error : {args.continue_on_ohlcv_error}")
     print(f"log-dir                 : {args.log_dir}")
     print(f"lock-dir                : {args.lock_dir}")
     print(f"summary-dir             : {args.summary_dir}")
     print(f"write-db                : {write_db if write_db else '(disabled)'}")
+    print(f"import-observations-db  : {import_obs}")
+    print(f"observations-jsonl      : {observations_jsonl}")
+    print(f"import-risk-flags       : {import_risk_flags}")
     print()
     if write_db:
         print(
@@ -558,8 +684,20 @@ def print_dry_run(steps: List[Tuple[str, List[str]]], args: argparse.Namespace) 
             f"created, initialized, or touched during a dry run."
         )
         print()
+    if import_obs:
+        print(
+            f"Observation import is PLANNED but NOT executed in dry run: would import "
+            f"observations JSONL '{observations_jsonl}' into existing DuckDB "
+            f"'{write_db}' (strategy_observations"
+            + (", risk_flags" if import_risk_flags else "")
+            + " only, upsert). Risk flags imported: "
+            f"{import_risk_flags}. The database and observations file are not "
+            f"created or touched during a dry run; future_position_events is never "
+            f"written."
+        )
+        print()
     print("Dry run: no runtime directories created, no lock file created, "
-          "no child scripts executed, no database written.")
+          "no child scripts executed, no database written, no observations imported.")
 
 
 def execute_run(
@@ -573,12 +711,33 @@ def execute_run(
         steps = build_default_steps()
 
     write_db = getattr(args, "write_db", None)
+    import_obs = getattr(args, "import_observations_db", False)
+    observations_jsonl = getattr(args, "observations_jsonl", DEFAULT_OBSERVATIONS_JSONL)
+    import_risk_flags = getattr(args, "import_risk_flags", False)
+
+    # Pre-flight: --import-observations-db is meaningless without an existing DB
+    # to write into, so it requires --write-db. Fail fast before any work.
+    if import_obs and not write_db:
+        print(f"ERROR: {OBS_REQUIRES_DB_MSG}", file=sys.stderr)
+        return 2
 
     # Pre-flight: if a DB write was requested, the DB must already exist. We
     # never auto-create or auto-initialize it. Fail fast before doing any work
     # so a missing DB does not waste a full pipeline run or create runtime dirs.
     if write_db and not db_file_present(write_db):
         print(f"ERROR: {DB_MISSING_MSG}", file=sys.stderr)
+        return 2
+
+    # Pre-flight: if an observation import was requested, the observations JSONL
+    # must already exist. We never auto-create it and never silently skip. Fail
+    # fast before any work so a missing file does not waste a full pipeline run
+    # or create runtime dirs.
+    if import_obs and not observations_file_present(observations_jsonl):
+        print(
+            f"ERROR: {OBS_MISSING_MSG}: {observations_jsonl}. "
+            "This runner does not create the observations file.",
+            file=sys.stderr,
+        )
         return 2
 
     log_dir = Path(args.log_dir)
@@ -628,6 +787,9 @@ def execute_run(
 
         ended_at = now_fn()
         db_write_status = DB_WRITE_PENDING if write_db else DB_WRITE_NOT_REQUESTED
+        observation_db_import_status = (
+            OBS_IMPORT_PENDING if import_obs else OBS_IMPORT_NOT_REQUESTED
+        )
         summary = build_summary_dict(
             run_id=run_id,
             started_at=started_at,
@@ -638,6 +800,9 @@ def execute_run(
             log_file=str(log_path),
             db_path=write_db,
             db_write_status=db_write_status,
+            observations_jsonl=observations_jsonl if import_obs else None,
+            observation_db_import_status=observation_db_import_status,
+            import_risk_flags=import_risk_flags,
         )
 
         # Write the summary JSON first; the importer reads this exact file. The
@@ -656,6 +821,21 @@ def execute_run(
             # Re-write artifacts with the final DB write status.
             write_summary_files(summary, summary_json_path, summary_md_path)
 
+        # Optional strategy-observation import happens AFTER the run summary
+        # import, on both successful and failed pipeline runs (the observations
+        # JSONL existence was already pre-flighted above). It writes only to
+        # strategy_observations and (with --import-risk-flags) risk_flags, never
+        # future_position_events. A failed import makes the runner exit non-zero.
+        obs_import_failed = False
+        if import_obs:
+            observation_db_import_status = import_observations_into_db(
+                write_db, observations_jsonl, import_risk_flags
+            )
+            obs_import_failed = observation_db_import_status != OBS_IMPORT_SUCCESS
+            summary["observation_db_import_status"] = observation_db_import_status
+            # Re-write artifacts with the final observation import status.
+            write_summary_files(summary, summary_json_path, summary_md_path)
+
         print(f"Run {run_id} finished: {outcome.status}")
         if stale_lock_replaced:
             print("Note: a stale lock was detected and replaced.")
@@ -664,8 +844,13 @@ def execute_run(
         print(f"Markdown: {summary_md_path}")
         if write_db:
             print(f"DB write: {db_write_status} -> {write_db}")
+        if import_obs:
+            print(
+                f"Observation import: {observation_db_import_status} -> {write_db} "
+                f"(risk_flags={import_risk_flags})"
+            )
 
-        if outcome.status != "SUCCESS" or db_import_failed:
+        if outcome.status != "SUCCESS" or db_import_failed or obs_import_failed:
             return 1
         return 0
     finally:
@@ -674,6 +859,14 @@ def execute_run(
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
+
+    # --import-observations-db requires --write-db. Enforce before any work
+    # (including dry-run printing and pipeline execution) so the runner does not
+    # run the pipeline when the flag combination is invalid.
+    if getattr(args, "import_observations_db", False) and not args.write_db:
+        print(f"ERROR: {OBS_REQUIRES_DB_MSG}", file=sys.stderr)
+        return 2
+
     steps = build_default_steps()
     if args.dry_run:
         print_dry_run(steps, args)

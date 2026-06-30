@@ -67,6 +67,11 @@ def make_args(tmp, **overrides):
         lock_dir=str(Path(tmp) / "locks"),
         summary_dir=str(Path(tmp) / "summaries"),
         write_db=overrides.get("write_db", None),
+        import_observations_db=overrides.get("import_observations_db", False),
+        observations_jsonl=overrides.get(
+            "observations_jsonl", rop.DEFAULT_OBSERVATIONS_JSONL
+        ),
+        import_risk_flags=overrides.get("import_risk_flags", False),
     )
     return ns
 
@@ -659,6 +664,453 @@ class WriteDbRealDuckDbTests(unittest.TestCase):
                 "SELECT run_id FROM pipeline_runs"
             ).fetchone()[0]
             self.assertEqual(only_run_id, run_id)
+
+
+# --------------------------------------------------------------------------- #
+# Optional strategy-observation import support (--import-observations-db)
+# --------------------------------------------------------------------------- #
+
+def _write_observations_jsonl(tmp, records=None, name="strategy_observations.jsonl"):
+    """Write a minimal valid observations JSONL and return its path."""
+    if records is None:
+        records = [
+            {
+                "observed_at": "2026-06-30T12:00:00+00:00",
+                "pair_key": "AAA-BBB",
+                "pair_label": "AAA-BBB",
+                "strategy_class_v2": "CORE",
+                "live_eligibility": "OBSERVE_ONLY",
+                "observation_ready": False,
+                "risk_flags": ["LOW_LIQUIDITY"],
+            }
+        ]
+    path = Path(tmp) / "data" / "observations" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(json.dumps(r) + "\n")
+    return path
+
+
+class ImportObservationsRequiresWriteDbTests(unittest.TestCase):
+    """--import-observations-db requires --write-db, enforced before the run."""
+
+    def test_requires_write_db_fails_before_pipeline(self):
+        called = {"execute": False}
+
+        def boom_execute(*a, **k):  # pragma: no cover - must never run
+            called["execute"] = True
+            raise AssertionError("pipeline ran without --write-db")
+
+        original = rop.execute_run
+        rop.execute_run = boom_execute
+        err = io.StringIO()
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                rc = rop.main(["--import-observations-db"])
+        finally:
+            rop.execute_run = original
+
+        self.assertEqual(rc, 2)
+        self.assertFalse(called["execute"])
+        self.assertIn("--import-observations-db requires --write-db", err.getvalue())
+
+    def test_requires_write_db_also_blocks_dry_run(self):
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            rc = rop.main(["--dry-run", "--import-observations-db"])
+        self.assertEqual(rc, 2)
+        self.assertIn("--import-observations-db requires --write-db", err.getvalue())
+
+
+class ImportObservationsDryRunTests(unittest.TestCase):
+    def test_dry_run_touches_no_db_and_no_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "runtime" / "dlmm.duckdb"  # does NOT exist
+            obs = Path(tmp) / "data" / "observations" / "strategy_observations.jsonl"
+
+            def boom(name, command):  # pragma: no cover - must never run
+                raise AssertionError("child step executed during dry run")
+
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = rop.main(
+                    [
+                        "--dry-run",
+                        "--write-db", str(db_path),
+                        "--import-observations-db",
+                        "--import-risk-flags",
+                        "--observations-jsonl", str(obs),
+                        "--log-dir", str(Path(tmp) / "logs"),
+                        "--lock-dir", str(Path(tmp) / "locks"),
+                        "--summary-dir", str(Path(tmp) / "summaries"),
+                    ]
+                )
+            self.assertEqual(rc, 0)
+            # No runtime dirs, no DB, no observations file created.
+            self.assertFalse((Path(tmp) / "logs").exists())
+            self.assertFalse((Path(tmp) / "locks").exists())
+            self.assertFalse((Path(tmp) / "summaries").exists())
+            self.assertFalse(db_path.exists())
+            self.assertFalse(db_path.parent.exists())
+            self.assertFalse(obs.exists())
+            out = buf.getvalue()
+            # Plans the run summary write AND the observation import.
+            self.assertIn("DB write is PLANNED", out)
+            self.assertIn("Observation import is PLANNED", out)
+            self.assertIn("NOT executed", out)
+            self.assertIn(str(obs), out)
+            self.assertIn("Risk flags imported: True", out)
+
+
+class ImportObservationsMissingFileTests(unittest.TestCase):
+    def test_missing_observations_file_fails_before_pipeline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "runtime" / "dlmm.duckdb"
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            db_path.write_text("placeholder")  # passes existence pre-flight
+            missing = Path(tmp) / "data" / "observations" / "strategy_observations.jsonl"
+            args = make_args(
+                tmp,
+                write_db=str(db_path),
+                import_observations_db=True,
+                observations_jsonl=str(missing),
+            )
+
+            def boom(name, command):  # pragma: no cover - pipeline must not run
+                raise AssertionError("pipeline ran despite missing observations file")
+
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=boom, now_fn=FakeClock()
+                )
+            self.assertEqual(rc, 2)
+            self.assertIn(rop.OBS_MISSING_MSG, err.getvalue())
+            self.assertIn(str(missing), err.getvalue())
+            # Fail-fast: no runtime dirs created.
+            self.assertFalse(Path(args.log_dir).exists())
+            self.assertFalse(Path(args.lock_dir).exists())
+            self.assertFalse(Path(args.summary_dir).exists())
+
+
+class ImportObservationsStatusTests(unittest.TestCase):
+    """Status plumbing via fake importers — runs without duckdb installed."""
+
+    def _existing_db_path(self, tmp):
+        db_path = Path(tmp) / "runtime" / "dlmm.duckdb"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db_path.write_text("placeholder")
+        return db_path
+
+    def test_default_run_does_not_import_observations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_args(tmp)  # no write_db, no import_observations_db
+
+            def boom(*a, **k):  # pragma: no cover - must never run
+                raise AssertionError("observation import must not run by default")
+
+            original = rop.import_observations_into_db
+            rop.import_observations_into_db = boom
+            try:
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            finally:
+                rop.import_observations_into_db = original
+
+            self.assertEqual(rc, 0)
+            summary = _read_summary_json(args.summary_dir)
+            self.assertEqual(
+                summary["observation_db_import_status"], rop.OBS_IMPORT_NOT_REQUESTED
+            )
+            self.assertIsNone(summary["observations_jsonl"])
+            self.assertEqual(summary["import_risk_flags"], False)
+
+    def test_observations_imported_after_successful_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._existing_db_path(tmp)
+            obs = _write_observations_jsonl(tmp)
+            args = make_args(
+                tmp, write_db=str(db_path),
+                import_observations_db=True, observations_jsonl=str(obs),
+            )
+            order = []
+
+            def fake_summary_import(p, s):
+                order.append("summary")
+                return rop.DB_WRITE_SUCCESS
+
+            obs_calls = []
+
+            def fake_obs_import(p, o, irf):
+                order.append("observations")
+                obs_calls.append((str(p), str(o), irf))
+                return rop.OBS_IMPORT_SUCCESS
+
+            orig_s = rop.import_run_summary_into_db
+            orig_o = rop.import_observations_into_db
+            rop.import_run_summary_into_db = fake_summary_import
+            rop.import_observations_into_db = fake_obs_import
+            try:
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            finally:
+                rop.import_run_summary_into_db = orig_s
+                rop.import_observations_into_db = orig_o
+
+            self.assertEqual(rc, 0)
+            # Observation import runs AFTER the run summary import.
+            self.assertEqual(order, ["summary", "observations"])
+            self.assertEqual(len(obs_calls), 1)
+            self.assertEqual(obs_calls[0][0], str(db_path))
+            self.assertEqual(obs_calls[0][1], str(obs))
+            summary = _read_summary_json(args.summary_dir)
+            self.assertEqual(
+                summary["observation_db_import_status"], rop.OBS_IMPORT_SUCCESS
+            )
+            self.assertEqual(summary["observations_jsonl"], str(obs))
+
+    def test_import_risk_flags_passed_through(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._existing_db_path(tmp)
+            obs = _write_observations_jsonl(tmp)
+            captured = []
+
+            def fake_obs_import(p, o, irf):
+                captured.append(irf)
+                return rop.OBS_IMPORT_SUCCESS
+
+            orig_s = rop.import_run_summary_into_db
+            orig_o = rop.import_observations_into_db
+            rop.import_run_summary_into_db = lambda p, s: rop.DB_WRITE_SUCCESS
+            rop.import_observations_into_db = fake_obs_import
+            try:
+                # With --import-risk-flags -> True passed through.
+                args_on = make_args(
+                    tmp, write_db=str(db_path), import_observations_db=True,
+                    observations_jsonl=str(obs), import_risk_flags=True,
+                )
+                rop.execute_run(
+                    args_on, steps=_ok_steps(),
+                    step_runner=fake_runner_factory({}), now_fn=FakeClock(),
+                )
+                # Without it -> False passed through.
+                args_off = make_args(
+                    tmp, write_db=str(db_path), import_observations_db=True,
+                    observations_jsonl=str(obs), import_risk_flags=False,
+                )
+                rop.execute_run(
+                    args_off, steps=_ok_steps(),
+                    step_runner=fake_runner_factory({}), now_fn=FakeClock(),
+                )
+            finally:
+                rop.import_run_summary_into_db = orig_s
+                rop.import_observations_into_db = orig_o
+
+            self.assertEqual(captured, [True, False])
+
+    def test_observation_import_failure_exits_nonzero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._existing_db_path(tmp)
+            obs = _write_observations_jsonl(tmp)
+            args = make_args(
+                tmp, write_db=str(db_path),
+                import_observations_db=True, observations_jsonl=str(obs),
+            )
+
+            orig_s = rop.import_run_summary_into_db
+            orig_o = rop.import_observations_into_db
+            rop.import_run_summary_into_db = lambda p, s: rop.DB_WRITE_SUCCESS
+            rop.import_observations_into_db = lambda p, o, irf: rop.OBS_IMPORT_FAILED
+            try:
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            finally:
+                rop.import_run_summary_into_db = orig_s
+                rop.import_observations_into_db = orig_o
+
+            # Pipeline + run summary import succeeded, but obs import failed.
+            self.assertNotEqual(rc, 0)
+            summary = _read_summary_json(args.summary_dir)
+            self.assertEqual(summary["status"], "SUCCESS")
+            self.assertEqual(summary["db_write_status"], rop.DB_WRITE_SUCCESS)
+            self.assertEqual(
+                summary["observation_db_import_status"], rop.OBS_IMPORT_FAILED
+            )
+
+    def test_failed_pipeline_still_imports_summary_and_observations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._existing_db_path(tmp)
+            obs = _write_observations_jsonl(tmp)
+            args = make_args(
+                tmp, write_db=str(db_path),
+                import_observations_db=True, observations_jsonl=str(obs),
+            )
+            calls = {"summary": 0, "observations": 0}
+
+            orig_s = rop.import_run_summary_into_db
+            orig_o = rop.import_observations_into_db
+
+            def fake_summary_import(p, s):
+                calls["summary"] += 1
+                return rop.DB_WRITE_SUCCESS
+
+            def fake_obs_import(p, o, irf):
+                calls["observations"] += 1
+                return rop.OBS_IMPORT_SUCCESS
+
+            rop.import_run_summary_into_db = fake_summary_import
+            rop.import_observations_into_db = fake_obs_import
+            try:
+                runner = fake_runner_factory({rop.VALIDATE_STEP_NAME: 1})
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=runner, now_fn=FakeClock()
+                )
+            finally:
+                rop.import_run_summary_into_db = orig_s
+                rop.import_observations_into_db = orig_o
+
+            # Both imports still happened on a failed pipeline...
+            self.assertEqual(calls["summary"], 1)
+            self.assertEqual(calls["observations"], 1)
+            summary = _read_summary_json(args.summary_dir)
+            self.assertEqual(summary["status"], "FAILED")
+            self.assertEqual(summary["db_write_status"], rop.DB_WRITE_SUCCESS)
+            self.assertEqual(
+                summary["observation_db_import_status"], rop.OBS_IMPORT_SUCCESS
+            )
+            # ...but the runner still exits non-zero because the pipeline failed.
+            self.assertNotEqual(rc, 0)
+
+    def test_summary_json_and_md_include_observation_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._existing_db_path(tmp)
+            obs = _write_observations_jsonl(tmp)
+            args = make_args(
+                tmp, write_db=str(db_path), import_observations_db=True,
+                observations_jsonl=str(obs), import_risk_flags=True,
+            )
+            orig_s = rop.import_run_summary_into_db
+            orig_o = rop.import_observations_into_db
+            rop.import_run_summary_into_db = lambda p, s: rop.DB_WRITE_SUCCESS
+            rop.import_observations_into_db = lambda p, o, irf: rop.OBS_IMPORT_SUCCESS
+            try:
+                rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            finally:
+                rop.import_run_summary_into_db = orig_s
+                rop.import_observations_into_db = orig_o
+
+            summary = _read_summary_json(args.summary_dir)
+            for key in (
+                "observation_db_import_status",
+                "observations_jsonl",
+                "import_risk_flags",
+            ):
+                self.assertIn(key, summary)
+            self.assertEqual(summary["import_risk_flags"], True)
+
+            md = _read_summary_md(args.summary_dir)
+            self.assertIn("Observation DB import status", md)
+            self.assertIn("Observations JSONL", md)
+            self.assertIn("Risk flags imported", md)
+
+
+@unittest.skipUnless(HAS_DUCKDB, "duckdb not installed")
+class ImportObservationsRealDuckDbTests(unittest.TestCase):
+    """End-to-end against a real initialized DuckDB via the real importers."""
+
+    def _init_db(self, tmp):
+        db_path = Path(tmp) / "runtime" / "dlmm.duckdb"
+        idb.init_db(str(db_path))
+        return db_path
+
+    def _counts(self, db_path):
+        conn = duckdb.connect(str(db_path))
+        try:
+            return {
+                "runs": conn.execute("SELECT COUNT(*) FROM pipeline_runs").fetchone()[0],
+                "steps": conn.execute(
+                    "SELECT COUNT(*) FROM pipeline_steps"
+                ).fetchone()[0],
+                "obs": conn.execute(
+                    "SELECT COUNT(*) FROM strategy_observations"
+                ).fetchone()[0],
+                "flags": conn.execute("SELECT COUNT(*) FROM risk_flags").fetchone()[0],
+                "fpe": conn.execute(
+                    "SELECT COUNT(*) FROM future_position_events"
+                ).fetchone()[0],
+            }
+        finally:
+            conn.close()
+
+    def test_successful_run_imports_observations_and_risk_flags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._init_db(tmp)
+            obs = _write_observations_jsonl(tmp)
+            args = make_args(
+                tmp, write_db=str(db_path), import_observations_db=True,
+                observations_jsonl=str(obs), import_risk_flags=True,
+            )
+            with redirect_stdout(io.StringIO()):
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            self.assertEqual(rc, 0)
+            counts = self._counts(db_path)
+            self.assertEqual(counts["runs"], 1)
+            self.assertEqual(counts["steps"], len(_ok_steps()))
+            self.assertEqual(counts["obs"], 1)
+            self.assertGreaterEqual(counts["flags"], 1)
+            # The hard boundary: future_position_events is NEVER written.
+            self.assertEqual(counts["fpe"], 0)
+            summary = _read_summary_json(args.summary_dir)
+            self.assertEqual(
+                summary["observation_db_import_status"], rop.OBS_IMPORT_SUCCESS
+            )
+
+    def test_no_future_position_events_write_introduced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._init_db(tmp)
+            obs = _write_observations_jsonl(tmp)
+            args = make_args(
+                tmp, write_db=str(db_path), import_observations_db=True,
+                observations_jsonl=str(obs), import_risk_flags=True,
+            )
+            with redirect_stdout(io.StringIO()):
+                rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            self.assertEqual(self._counts(db_path)["fpe"], 0)
+
+    def test_risk_flags_not_written_without_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._init_db(tmp)
+            obs = _write_observations_jsonl(tmp)
+            args = make_args(
+                tmp, write_db=str(db_path), import_observations_db=True,
+                observations_jsonl=str(obs), import_risk_flags=False,
+            )
+            with redirect_stdout(io.StringIO()):
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            self.assertEqual(rc, 0)
+            counts = self._counts(db_path)
+            self.assertEqual(counts["obs"], 1)
+            self.assertEqual(counts["flags"], 0)
+            self.assertEqual(counts["fpe"], 0)
 
 
 if __name__ == "__main__":
