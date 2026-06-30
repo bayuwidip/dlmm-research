@@ -106,6 +106,27 @@ OBS_REQUIRES_DB_MSG = "--import-observations-db requires --write-db"
 # The runner does not create the observations file; it fails rather than skip.
 OBS_MISSING_MSG = "Observations JSONL not found"
 
+# Optional risk-decisions import support (only active when
+# --import-risk-decisions-db is provided, which itself requires --write-db). The
+# runner NEVER creates the DB or the risk decisions CSV; it only imports an
+# already-written data/risk_decisions.csv (produced by apply_risk_policy.py)
+# into an EXISTING DB via the risk decisions importer. DB writes stay limited to
+# risk_decisions; future_position_events is never written.
+RISK_DEC_IMPORT_NOT_REQUESTED = "NOT_REQUESTED"
+RISK_DEC_IMPORT_PENDING = "PENDING"
+RISK_DEC_IMPORT_SUCCESS = "SUCCESS"
+RISK_DEC_IMPORT_FAILED = "FAILED"
+
+DEFAULT_RISK_DECISIONS_CSV = "data/risk_decisions.csv"
+
+# Exact message required when --import-risk-decisions-db is requested without
+# --write-db (the importer needs an existing DB to write into).
+RISK_DEC_REQUIRES_DB_MSG = "--import-risk-decisions-db requires --write-db"
+
+# Message when the risk decisions CSV is missing but its import was requested.
+# The runner does not create the CSV; it fails rather than skip.
+RISK_DEC_MISSING_MSG = "Risk decisions CSV not found"
+
 
 def build_default_steps() -> List[Tuple[str, List[str]]]:
     """Return the ordered pipeline steps as (name, command-list) tuples.
@@ -388,6 +409,15 @@ def observations_file_present(observations_jsonl) -> bool:
     return Path(observations_jsonl).is_file()
 
 
+def risk_decisions_file_present(risk_decisions_csv) -> bool:
+    """Return True only if risk_decisions_csv points to an existing regular file.
+
+    Pure filesystem check (stdlib only). It never creates the risk decisions CSV
+    — the runner does not auto-create it (apply_risk_policy.py produces it).
+    """
+    return Path(risk_decisions_csv).is_file()
+
+
 def _load_importer():
     """Deferred import of scripts/import_run_summary_to_db.py.
 
@@ -415,6 +445,21 @@ def _load_observations_importer():
         sys.path.insert(0, scripts_dir)
     import import_strategy_observations_to_db as obs_importer  # noqa: PLC0415
     return obs_importer
+
+
+def _load_risk_decisions_importer():
+    """Deferred import of scripts/import_risk_decisions_to_db.py.
+
+    Imported lazily (only when --import-risk-decisions-db is used) so a normal run
+    never depends on the risk decisions importer module or on duckdb. The importer
+    itself defers its own duckdb import, so loading this module does not pull in
+    duckdb.
+    """
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import import_risk_decisions_to_db as risk_dec_importer  # noqa: PLC0415
+    return risk_dec_importer
 
 
 def import_run_summary_into_db(db_path, summary_json_path) -> str:
@@ -469,6 +514,35 @@ def import_observations_into_db(db_path, observations_jsonl, import_risk_flags) 
     return OBS_IMPORT_SUCCESS if rc == 0 else OBS_IMPORT_FAILED
 
 
+def import_risk_decisions_into_db(db_path, risk_decisions_csv) -> Tuple[str, Optional[int]]:
+    """Import an EXISTING risk decisions CSV into an EXISTING DuckDB.
+
+    Reuses scripts/import_risk_decisions_to_db.py instead of duplicating SQL, so
+    the importer's guarantees hold: it writes ONLY to risk_decisions and never to
+    pipeline_runs, pipeline_steps, strategy_observations, risk_flags, or
+    future_position_events. Imports with upsert=True so repeated runs do not fail
+    on duplicate deterministic risk_decision_ids. Never creates or initializes the
+    database, and never creates the risk decisions CSV.
+
+    Returns (status, exit_code). status is RISK_DEC_IMPORT_SUCCESS or
+    RISK_DEC_IMPORT_FAILED; exit_code is the importer's return code (or None if it
+    raised). Does not raise.
+    """
+    try:
+        risk_dec_importer = _load_risk_decisions_importer()
+        rc = risk_dec_importer.run_import(
+            db_path=str(db_path),
+            risk_decisions_csv=str(risk_decisions_csv),
+            dry_run=False,
+            upsert=True,
+        )
+    except Exception as exc:  # defensive: run_import normally returns a code
+        print(f"ERROR: risk decisions DuckDB import failed: {exc}", file=sys.stderr)
+        return RISK_DEC_IMPORT_FAILED, None
+    status = RISK_DEC_IMPORT_SUCCESS if rc == 0 else RISK_DEC_IMPORT_FAILED
+    return status, rc
+
+
 # --------------------------------------------------------------------------- #
 # Summary generation
 # --------------------------------------------------------------------------- #
@@ -486,6 +560,11 @@ def build_summary_dict(
     observations_jsonl: Optional[str] = None,
     observation_db_import_status: str = OBS_IMPORT_NOT_REQUESTED,
     import_risk_flags: bool = False,
+    import_risk_decisions_db: bool = False,
+    risk_decisions_csv: Optional[str] = None,
+    risk_decisions_db_import_status: str = RISK_DEC_IMPORT_NOT_REQUESTED,
+    risk_decisions_db_exit_code: Optional[int] = None,
+    risk_decisions_db_message: Optional[str] = None,
 ) -> dict:
     return {
         "run_id": run_id,
@@ -503,6 +582,21 @@ def build_summary_dict(
         "observations_jsonl": observations_jsonl,
         "observation_db_import_status": observation_db_import_status,
         "import_risk_flags": import_risk_flags,
+        # Flat status fields mirror the observation-import shape for symmetry.
+        "risk_decisions_csv": risk_decisions_csv,
+        "risk_decisions_db_import_status": risk_decisions_db_import_status,
+        # Nested object carries the full requested schema (enabled / attempted /
+        # success / paths / exit_code / message) without disturbing older fields.
+        "risk_decisions_db_import": {
+            "enabled": import_risk_decisions_db,
+            "attempted": risk_decisions_db_import_status
+            in (RISK_DEC_IMPORT_SUCCESS, RISK_DEC_IMPORT_FAILED),
+            "success": risk_decisions_db_import_status == RISK_DEC_IMPORT_SUCCESS,
+            "risk_decisions_csv": risk_decisions_csv,
+            "db_path": db_path,
+            "exit_code": risk_decisions_db_exit_code,
+            "message": risk_decisions_db_message,
+        },
         "steps": [s.to_dict() for s in outcome.steps],
     }
 
@@ -538,6 +632,15 @@ def build_summary_markdown(summary: dict, summary_json_path: str) -> str:
     lines.append(f"- **Observations JSONL:** {summary.get('observations_jsonl')}")
     lines.append(
         f"- **Risk flags imported:** {bool(summary.get('import_risk_flags', False))}"
+    )
+    lines.append(
+        "- **Risk decisions DB import status:** "
+        f"{summary.get('risk_decisions_db_import_status', RISK_DEC_IMPORT_NOT_REQUESTED)}"
+    )
+    lines.append(f"- **Risk decisions CSV:** {summary.get('risk_decisions_csv')}")
+    rd = summary.get("risk_decisions_db_import") or {}
+    lines.append(
+        f"- **Risk decisions DB import exit code:** {rd.get('exit_code')}"
     )
     lines.append("")
     lines.append("## Safety Boundary")
@@ -658,6 +761,24 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
             "from each observation."
         ),
     )
+    parser.add_argument(
+        "--import-risk-decisions-db",
+        action="store_true",
+        help=(
+            "After the run, also import the risk decisions CSV (produced by "
+            "apply_risk_policy.py) into the EXISTING DuckDB (risk_decisions only, "
+            "upsert). Requires --write-db. Never writes future_position_events; "
+            "never creates the DB or the risk decisions CSV."
+        ),
+    )
+    parser.add_argument(
+        "--risk-decisions-csv",
+        default=DEFAULT_RISK_DECISIONS_CSV,
+        help=(
+            "Path to the risk decisions CSV imported when --import-risk-decisions-db "
+            f"is set (default: {DEFAULT_RISK_DECISIONS_CSV})."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -674,14 +795,18 @@ def print_dry_run(steps: List[Tuple[str, List[str]]], args: argparse.Namespace) 
     import_obs = getattr(args, "import_observations_db", False)
     observations_jsonl = getattr(args, "observations_jsonl", DEFAULT_OBSERVATIONS_JSONL)
     import_risk_flags = getattr(args, "import_risk_flags", False)
-    print(f"continue_on_ohlcv_error : {args.continue_on_ohlcv_error}")
-    print(f"log-dir                 : {args.log_dir}")
-    print(f"lock-dir                : {args.lock_dir}")
-    print(f"summary-dir             : {args.summary_dir}")
-    print(f"write-db                : {write_db if write_db else '(disabled)'}")
-    print(f"import-observations-db  : {import_obs}")
-    print(f"observations-jsonl      : {observations_jsonl}")
-    print(f"import-risk-flags       : {import_risk_flags}")
+    import_risk_dec = getattr(args, "import_risk_decisions_db", False)
+    risk_decisions_csv = getattr(args, "risk_decisions_csv", DEFAULT_RISK_DECISIONS_CSV)
+    print(f"continue_on_ohlcv_error  : {args.continue_on_ohlcv_error}")
+    print(f"log-dir                  : {args.log_dir}")
+    print(f"lock-dir                 : {args.lock_dir}")
+    print(f"summary-dir              : {args.summary_dir}")
+    print(f"write-db                 : {write_db if write_db else '(disabled)'}")
+    print(f"import-observations-db   : {import_obs}")
+    print(f"observations-jsonl       : {observations_jsonl}")
+    print(f"import-risk-flags        : {import_risk_flags}")
+    print(f"import-risk-decisions-db : {import_risk_dec}")
+    print(f"risk-decisions-csv       : {risk_decisions_csv}")
     print()
     if write_db:
         print(
@@ -703,8 +828,18 @@ def print_dry_run(steps: List[Tuple[str, List[str]]], args: argparse.Namespace) 
             f"written."
         )
         print()
+    if import_risk_dec:
+        print(
+            f"Risk decisions import is PLANNED but NOT executed in dry run: would "
+            f"import risk decisions CSV '{risk_decisions_csv}' into existing DuckDB "
+            f"'{write_db}' (risk_decisions only, upsert). The database and risk "
+            f"decisions CSV are not created or touched during a dry run; "
+            f"future_position_events is never written."
+        )
+        print()
     print("Dry run: no runtime directories created, no lock file created, "
-          "no child scripts executed, no database written, no observations imported.")
+          "no child scripts executed, no database written, no observations "
+          "imported, no risk decisions imported.")
 
 
 def execute_run(
@@ -721,11 +856,19 @@ def execute_run(
     import_obs = getattr(args, "import_observations_db", False)
     observations_jsonl = getattr(args, "observations_jsonl", DEFAULT_OBSERVATIONS_JSONL)
     import_risk_flags = getattr(args, "import_risk_flags", False)
+    import_risk_dec = getattr(args, "import_risk_decisions_db", False)
+    risk_decisions_csv = getattr(args, "risk_decisions_csv", DEFAULT_RISK_DECISIONS_CSV)
 
     # Pre-flight: --import-observations-db is meaningless without an existing DB
     # to write into, so it requires --write-db. Fail fast before any work.
     if import_obs and not write_db:
         print(f"ERROR: {OBS_REQUIRES_DB_MSG}", file=sys.stderr)
+        return 2
+
+    # Pre-flight: --import-risk-decisions-db likewise requires an existing DB, so
+    # it requires --write-db. Fail fast before any work.
+    if import_risk_dec and not write_db:
+        print(f"ERROR: {RISK_DEC_REQUIRES_DB_MSG}", file=sys.stderr)
         return 2
 
     # Pre-flight: if a DB write was requested, the DB must already exist. We
@@ -746,6 +889,12 @@ def execute_run(
             file=sys.stderr,
         )
         return 2
+
+    # NOTE: there is deliberately NO early existence pre-flight for the risk
+    # decisions CSV. apply_risk_policy.py is a runtime pipeline step that PRODUCES
+    # data/risk_decisions.csv, so the file is legitimately absent before the
+    # pipeline runs. The presence check happens post-pipeline, immediately before
+    # the importer is called (see below). The runner still never creates the CSV.
 
     log_dir = Path(args.log_dir)
     lock_dir = Path(args.lock_dir)
@@ -797,6 +946,9 @@ def execute_run(
         observation_db_import_status = (
             OBS_IMPORT_PENDING if import_obs else OBS_IMPORT_NOT_REQUESTED
         )
+        risk_decisions_db_import_status = (
+            RISK_DEC_IMPORT_PENDING if import_risk_dec else RISK_DEC_IMPORT_NOT_REQUESTED
+        )
         summary = build_summary_dict(
             run_id=run_id,
             started_at=started_at,
@@ -810,6 +962,9 @@ def execute_run(
             observations_jsonl=observations_jsonl if import_obs else None,
             observation_db_import_status=observation_db_import_status,
             import_risk_flags=import_risk_flags,
+            import_risk_decisions_db=import_risk_dec,
+            risk_decisions_csv=risk_decisions_csv if import_risk_dec else None,
+            risk_decisions_db_import_status=risk_decisions_db_import_status,
         )
 
         # Write the summary JSON first; the importer reads this exact file. The
@@ -843,6 +998,60 @@ def execute_run(
             # Re-write artifacts with the final observation import status.
             write_summary_files(summary, summary_json_path, summary_md_path)
 
+        # Optional risk-decisions import happens LAST — after the run summary and
+        # observation imports — so it only runs once the earlier DB import flow is
+        # safe. It writes only to risk_decisions (upsert), never
+        # future_position_events. A failed import makes the runner exit non-zero
+        # but never converts a failed pipeline into a pass.
+        #
+        # The risk decisions CSV is PRODUCED by apply_risk_policy.py during the
+        # pipeline, so its existence is checked HERE (post-pipeline), immediately
+        # before the importer. If it is still missing the import fails (the runner
+        # never creates the CSV and never calls the importer); otherwise it imports
+        # with upsert.
+        risk_dec_import_failed = False
+        if import_risk_dec:
+            rd = summary["risk_decisions_db_import"]
+            if not risk_decisions_file_present(risk_decisions_csv):
+                # CSV absent even after the pipeline ran -> post-pipeline failure.
+                risk_decisions_db_import_status = RISK_DEC_IMPORT_FAILED
+                risk_dec_import_failed = True
+                summary["risk_decisions_db_import_status"] = (
+                    risk_decisions_db_import_status
+                )
+                rd["attempted"] = True
+                rd["success"] = False
+                rd["exit_code"] = None
+                rd["message"] = f"{RISK_DEC_MISSING_MSG}: {risk_decisions_csv}"
+                print(
+                    f"ERROR: {RISK_DEC_MISSING_MSG}: {risk_decisions_csv}. "
+                    "This runner does not create the risk decisions CSV.",
+                    file=sys.stderr,
+                )
+                # Re-write artifacts with the failed status/message; do NOT call
+                # the importer and do NOT create the CSV.
+                write_summary_files(summary, summary_json_path, summary_md_path)
+            else:
+                risk_decisions_db_import_status, risk_dec_exit_code = (
+                    import_risk_decisions_into_db(write_db, risk_decisions_csv)
+                )
+                risk_dec_import_failed = (
+                    risk_decisions_db_import_status != RISK_DEC_IMPORT_SUCCESS
+                )
+                summary["risk_decisions_db_import_status"] = (
+                    risk_decisions_db_import_status
+                )
+                rd["attempted"] = True
+                rd["success"] = not risk_dec_import_failed
+                rd["exit_code"] = risk_dec_exit_code
+                rd["message"] = (
+                    None
+                    if not risk_dec_import_failed
+                    else f"risk decisions import failed (exit_code={risk_dec_exit_code})"
+                )
+                # Re-write artifacts with the final risk decisions import status.
+                write_summary_files(summary, summary_json_path, summary_md_path)
+
         print(f"Run {run_id} finished: {outcome.status}")
         if stale_lock_replaced:
             print("Note: a stale lock was detected and replaced.")
@@ -856,8 +1065,18 @@ def execute_run(
                 f"Observation import: {observation_db_import_status} -> {write_db} "
                 f"(risk_flags={import_risk_flags})"
             )
+        if import_risk_dec:
+            print(
+                f"Risk decisions import: {risk_decisions_db_import_status} -> "
+                f"{write_db} (csv={risk_decisions_csv})"
+            )
 
-        if outcome.status != "SUCCESS" or db_import_failed or obs_import_failed:
+        if (
+            outcome.status != "SUCCESS"
+            or db_import_failed
+            or obs_import_failed
+            or risk_dec_import_failed
+        ):
             return 1
         return 0
     finally:
@@ -872,6 +1091,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     # run the pipeline when the flag combination is invalid.
     if getattr(args, "import_observations_db", False) and not args.write_db:
         print(f"ERROR: {OBS_REQUIRES_DB_MSG}", file=sys.stderr)
+        return 2
+
+    # --import-risk-decisions-db likewise requires --write-db. Enforce before any
+    # work (including dry-run printing and pipeline execution).
+    if getattr(args, "import_risk_decisions_db", False) and not args.write_db:
+        print(f"ERROR: {RISK_DEC_REQUIRES_DB_MSG}", file=sys.stderr)
         return 2
 
     steps = build_default_steps()
