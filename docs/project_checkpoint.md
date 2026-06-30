@@ -297,8 +297,71 @@ This priority is for human / council review only.
 - Do **not** change candidate statuses.
 - Do **not** loosen `NO_ELIGIBLE_FEE_POOL`.
 - **Continue diagnostic work.**
-- **Next best task:** Candidate Deep Review Report for the 6 stable review candidates
-  (see §13).
+- **Next best task:** Manual Council Review Matrix for the 6 stable review candidates
+  (see §3i).
+
+---
+
+## 3i. Checkpoint: Candidate Evidence Pack Completed (2026-06-30)
+
+Latest merged features:
+
+- Candidate Deep Review v0.2
+- Candidate Evidence Pack v0.1
+
+Diagnostic summary:
+
+- 6 stable review candidates
+- pipeline run count: 5
+- distinct observation run count: 7
+- `future_position_events`: **0**
+- evidence sufficiency: **SUFFICIENT**
+- all 6 candidates are `CORE` / `CLEAN`
+- all 6 candidates have `observation_count = 7`
+- all 6 candidates have `distinct_run_count = 7`
+- all 6 candidates have zero runtime risk flags and zero blockers
+- all 6 candidates have `token_identity_status = NEEDS_MANUAL_REVIEW`
+- all 6 candidates have `pool_identity_status = NEEDS_MANUAL_REVIEW`
+
+Candidate evidence verdicts:
+
+| Candidate | Verdict |
+|---|---|
+| USDC-SOL | `REVIEW_ONLY_PASS` |
+| JUP-SOL | `NEEDS_MORE_DATA` |
+| USDC-cbBTC | `NEEDS_MORE_DATA` |
+| HYPE-USDC | `NEEDS_MORE_DATA` |
+| HYPE-SOL | `NEEDS_MORE_DATA` |
+| TRUMP-USDC | `NEEDS_MORE_DATA` |
+
+Safety interpretation:
+
+- `REVIEW_ONLY_PASS` means **human/council may review for future paper-simulation design
+  consideration**.
+- This does **not** authorize paper simulation.
+- This does **not** authorize paper entry, paper trade, open position, signal, wallet use,
+  signing, swap, LP add/remove, rebalance, or live execution.
+- No `future_position_events` writes are allowed.
+- The project remains diagnostic-only.
+
+Next recommended phase:
+
+- Manual Council Review Matrix
+- Token/pool identity review
+- Pool legitimacy/depth/fee-tier/bin review
+- OHLCV continuity/freshness review
+- Liquidity/volume/volatility manual review
+- Only after explicit council approval may a future paper-simulation design task be
+  proposed.
+
+Current decision:
+
+- Do **not** build paper engine yet.
+- Do **not** create paper positions.
+- Do **not** change thresholds.
+- Do **not** change risk policy.
+- Do **not** change candidate status.
+- End diagnostic feature batch.
 
 ---
 
