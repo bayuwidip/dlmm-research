@@ -113,6 +113,7 @@ class TestSafetyConstants(unittest.TestCase):
             "pipeline_steps",
             "strategy_observations",
             "risk_flags",
+            "risk_decisions",
             "future_position_events",
         }
         self.assertEqual(set(insp.REQUIRED_TABLES), expected)
