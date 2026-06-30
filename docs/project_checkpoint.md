@@ -48,7 +48,7 @@ Earlier milestones (through #11):
 - Strategy observations DuckDB importer merged (`scripts/import_strategy_observations_to_db.py`)
 - Project checkpoint updated for runtime storage (#11)
 
-Newly merged (this update — PRs #12 to #15):
+Merged earlier in this storage track (PRs #12 to #16):
 
 - **#12 — Optional observation DB import to runner.** `run_readonly_pipeline.py` can
   optionally import strategy observations into DuckDB. `--import-observations-db` requires
@@ -69,27 +69,79 @@ Newly merged (this update — PRs #12 to #15):
 - **#15 — Risk policy step wired into the runtime runner.** `run_readonly_pipeline.py`
   now runs `scripts/apply_risk_policy.py` after `observe_strategy.py` and before
   `validate_watchlist.py`. `apply_risk_policy` failure fails the runner; OHLCV
-  continue-on-error behavior is unchanged. No `risk_decisions` DuckDB import yet; no
-  `future_position_events` write.
+  continue-on-error behavior is unchanged.
+- **#16 — Checkpoint updated for the risk policy runner integration.**
+
+Newly merged (this update — PRs #17 and #18):
+
+- **#17 — Risk decisions DuckDB importer.** Added `scripts/import_risk_decisions_to_db.py`
+  (+ `tests/test_import_risk_decisions_to_db.py`). A standalone, offline import/bookkeeping
+  tool that imports an existing `data/risk_decisions.csv` (produced by
+  `apply_risk_policy.py`) into a new `risk_decisions` table in the runtime DuckDB.
+  - The runtime DuckDB schema now defines a `risk_decisions` table, and
+    `inspect_runtime_db.py` reports its row count.
+  - The importer validates required columns, the decision/action/`max_allowed_action`
+    enums, the exact `safety_phase`, and forbidden execution-authorization semantics before
+    writing anything.
+  - Supports `--dry-run` (validates + prints counts, writes nothing) and `--upsert`
+    (idempotent replace by deterministic `risk_decision_id`). A default (non-upsert)
+    duplicate import **fails** rather than duplicating rows.
+  - Writes **only** to `risk_decisions`. It never writes `pipeline_runs`,
+    `pipeline_steps`, `strategy_observations`, `risk_flags`, or `future_position_events`.
+- **#18 — Optional risk decisions DB import wired into the runner.**
+  `run_readonly_pipeline.py` gained `--import-risk-decisions-db` (with
+  `--risk-decisions-csv`, default `data/risk_decisions.csv`).
+  - `--import-risk-decisions-db` requires `--write-db`; default runner behavior is
+    unchanged.
+  - Dry-run writes no DB and only shows the planned risk decisions import.
+  - The runner imports risk decisions **after** the pipeline produces
+    `data/risk_decisions.csv` (post-pipeline existence check; the runner never creates the
+    CSV), using **upsert** so repeated imports do not fail on duplicates.
+  - A risk decisions import failure makes the runner exit non-zero (it never converts a
+    failed pipeline into a pass). Observation DB import and `risk_flags` import behavior are
+    unchanged. No `future_position_events` write is introduced.
+
+Full runner command (all optional imports enabled):
+
+```bash
+python3 scripts/run_readonly_pipeline.py \
+  --write-db runtime/dlmm.duckdb \
+  --import-observations-db \
+  --import-risk-flags \
+  --import-risk-decisions-db
+```
 
 ---
 
 ## 4. Current Pipeline
 
+Core pipeline (always runs, in order):
+
 ```
-fetch_meteora_pools.py
-  → build_watchlist.py
-  → fetch_ohlcv_top_pairs.py
-  → classify_strategy.py
-  → observe_strategy.py
-  → apply_risk_policy.py
-  → validate_watchlist.py
+1. fetch_meteora_pools.py
+2. build_watchlist.py
+3. fetch_ohlcv_top_pairs.py
+4. classify_strategy.py
+5. observe_strategy.py
+6. apply_risk_policy.py
+7. validate_watchlist.py
+```
+
+Optional DB-import steps (only when the matching flags are passed, and all require
+`--write-db`; they run after the core pipeline, never inside it):
+
+```
+8.  run summary DB import        (--write-db)
+9.  observations DB import       (--import-observations-db)
+10. risk_flags import            (--import-risk-flags, with observations import)
+11. risk_decisions import        (--import-risk-decisions-db)
 ```
 
 `validate_watchlist.py` remains the final validator. `apply_risk_policy.py` runs after
 observation and before validation (the validator now validates `data/risk_decisions.csv`, so
 the risk step must produce it first). A risk policy failure fails the runner; OHLCV
-continue-on-error behavior is unchanged.
+continue-on-error behavior is unchanged. Any optional import failure also makes the runner
+exit non-zero.
 
 ---
 
@@ -110,6 +162,7 @@ continue-on-error behavior is unchanged.
 - `scripts/inspect_runtime_db.py` — audit/inspect runtime DB state
 - `scripts/import_run_summary_to_db.py` — import run summary into DuckDB
 - `scripts/import_strategy_observations_to_db.py` — import strategy observations into DuckDB
+- `scripts/import_risk_decisions_to_db.py` — import risk decisions into DuckDB (`risk_decisions` only; offline import, `--dry-run`/`--upsert`)
 
 ---
 
@@ -121,16 +174,30 @@ Current manual/runtime storage flow (local VPS, read-only):
 run_readonly_pipeline.py --write-db runtime/dlmm.duckdb
   → pipeline_runs
   → pipeline_steps
-  → (optional --import-observations-db) strategy_observations
-  → (optional --import-risk-flags)     risk_flags
+  → (optional --import-observations-db)   strategy_observations
+  → (optional --import-risk-flags)        risk_flags
+  → (optional --import-risk-decisions-db) risk_decisions
 
 import_strategy_observations_to_db.py
   → strategy_observations
   → optional risk_flags
 
+import_risk_decisions_to_db.py
+  → risk_decisions
+
 inspect_runtime_db.py
-  → audit database state
+  → audit database state (now includes the risk_decisions count)
 ```
+
+Runtime DuckDB tables:
+
+- `runtime_schema_meta`
+- `pipeline_runs`
+- `pipeline_steps`
+- `strategy_observations`
+- `risk_flags`
+- `risk_decisions`
+- `future_position_events` — **reserved / display-only** (never written in this phase)
 
 Runtime / storage milestone status (DuckDB, local VPS):
 
@@ -139,9 +206,9 @@ Runtime / storage milestone status (DuckDB, local VPS):
 - run summary import — **exists**
 - strategy observation import — **exists**
 - optional risk flag import — **exists**
-- `inspect_runtime_db` — **exists**
-- risk decisions DuckDB import — **NOT yet** (`data/risk_decisions.csv` is generated and
-  validated, but not imported to DuckDB)
+- risk decisions DuckDB import — **exists** (standalone importer #17 + optional runner flag
+  #18; writes only `risk_decisions`, upsert in the runner)
+- `inspect_runtime_db` — **exists** (reports the `risk_decisions` count)
 - `future_position_events` — **schema-only / reserved**; the current pipeline must **not**
   write it
 
@@ -157,9 +224,10 @@ not authorize any on-chain action.
 - DuckDB is **local VPS runtime storage** only.
 - **No automatic commit-back** of runtime history to the repo.
 - **No secrets, wallet, private key, or execution data** in DuckDB.
-- Current DB writes are limited to: runtime metadata, pipeline steps, strategy
-  observations, and optional risk flags.
-- Risk decisions (`data/risk_decisions.csv`) are **not** imported to DuckDB yet.
+- Current DB writes are limited to: runtime metadata, pipeline runs/steps, strategy
+  observations, optional risk flags, and risk decisions.
+- Risk decisions (`data/risk_decisions.csv`) are imported into the `risk_decisions` table
+  via the standalone importer or the optional `--import-risk-decisions-db` runner flag.
 - `future_position_events` remains schema-only/reserved and must not be written by the
   current pipeline.
 
@@ -208,6 +276,15 @@ not authorize any on-chain action.
   `LIVE_ELIGIBLE_*` / entry / execution tokens in any cell.
 - If `apply_risk_policy.py` exists but `data/risk_decisions.csv` is missing, validation
   **fails** (the output is required once the layer exists).
+
+**Risk decisions storage status — imported (read-only):**
+
+- `scripts/import_risk_decisions_to_db.py` imports the validated CSV into the
+  `risk_decisions` table; the runner can do this automatically via
+  `--import-risk-decisions-db` (requires `--write-db`, upsert). The importer re-validates
+  columns/enums/`safety_phase`/forbidden tokens before writing and writes only to
+  `risk_decisions`. This is read-only bookkeeping — it confers no execution authority and
+  never writes `future_position_events`.
 
 ---
 
@@ -272,30 +349,37 @@ Runtime/storage + risk safety clarifications:
 
 ## 13. Next Recommended Milestones
 
-These are the recommended next milestones, in dependency order. Each preserves the §2 safety
-boundary. None of them authorizes paper entry or live execution.
+These are the recommended next milestones. Each preserves the §2 safety boundary. None of
+them authorizes paper entry or live execution.
 
-**A. Risk decisions DuckDB importer**
-- Import `data/risk_decisions.csv` into a new/defined `risk_decisions` table.
-- Read-only metadata only.
-- No `future_position_events`.
+**Done (PRs #17–#18):**
+- ~~Risk decisions DuckDB importer~~ — merged (`scripts/import_risk_decisions_to_db.py`, #17).
+- ~~Runtime runner optional risk DB import~~ — merged (`--import-risk-decisions-db`, #18).
 
-**B. Runtime runner optional risk DB import**
-- Only after the risk decisions importer (A) exists.
-- Optional flag only; requires `--write-db`.
-- Default runner behavior stays unchanged.
+**Next milestone — Runtime / Risk Dashboard Report**
 
-**C. Observation dashboard / reporting layer**
-- Summarize historical runs, observations, and risk decisions.
-- Local-only, read-only.
+A **read-only** dashboard that summarizes the DuckDB history (local-only, no execution
+authority). It should report:
+- pipeline run success/failure
+- pipeline step failures
+- latest observation counts
+- risk flag counts
+- risk decision distribution
+- repeated `PAPER_REVIEW_CANDIDATE` candidates
+- repeated `BLOCKED` / `REJECTED` reasons
+- `CORE` / `TACTICAL` stability over time
+- `future_position_events` count must remain **0** (asserted, display-only)
 
-**D. Paper simulation design document**
-- Design only — no implementation yet.
-- Must define paper accounting before any paper engine is built.
+**Before any paper-simulation implementation, the project still needs:**
+- historical dashboard / reporting (the milestone above)
+- paper accounting design
+- position lifecycle design
+- risk limits design
+- council / human approval rule
 
-**E. Telegram control room design document**
-- Design only.
-- No commands that alter positions or execution; read-only observer first.
+Each of these is design/reporting only and must not authorize paper entry or live execution.
+Later, a paper-simulation design document and a Telegram control-room design document (both
+design-only; read-only observer first) remain on the roadmap.
 
 **Still open (operational):**
 - Set up a VPS scheduled runner later — not GitHub Actions as runtime
