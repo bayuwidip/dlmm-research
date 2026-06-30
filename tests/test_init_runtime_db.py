@@ -83,9 +83,15 @@ class TestSchemaSql(unittest.TestCase):
             "pipeline_steps",
             "strategy_observations",
             "risk_flags",
+            "risk_decisions",
             "future_position_events",
         }
         self.assertEqual(set(idb.REQUIRED_TABLES), expected)
+
+    def test_risk_decisions_table_in_schema_sql(self):
+        sql = idb.build_schema_sql()
+        self.assertIn("risk_decisions", sql)
+        self.assertIn("risk_decision_id", sql)
 
     def test_schema_uses_create_if_not_exists_only(self):
         sql = idb.build_schema_sql().upper()
@@ -193,6 +199,26 @@ class TestInitDb(unittest.TestCase):
                 conn.close()
             for name in idb.REQUIRED_TABLES:
                 self.assertIn(name, present)
+
+    def test_risk_decisions_table_exists_after_init(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "runtime" / "dlmm.duckdb"
+            idb.init_db(str(db_path))
+            conn = duckdb.connect(str(db_path))
+            try:
+                present = idb.list_tables(conn)
+                cols = {
+                    r[1]
+                    for r in conn.execute(
+                        "PRAGMA table_info('risk_decisions')"
+                    ).fetchall()
+                }
+            finally:
+                conn.close()
+            self.assertIn("risk_decisions", present)
+            self.assertIn("risk_decision_id", cols)
+            self.assertIn("imported_at", cols)
+            self.assertIn("source_csv", cols)
 
     def test_schema_meta_row_exists_with_version_one(self):
         with tempfile.TemporaryDirectory() as tmp:

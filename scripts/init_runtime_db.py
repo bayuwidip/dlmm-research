@@ -156,6 +156,31 @@ CREATE TABLE IF NOT EXISTS risk_flags (
 );
 """.strip()
 
+SCHEMA_STATEMENTS["risk_decisions"] = """
+CREATE TABLE IF NOT EXISTS risk_decisions (
+    risk_decision_id        TEXT PRIMARY KEY,
+    imported_at             TIMESTAMP,
+    pair_key                TEXT,
+    pair_label              TEXT,
+    strategy_class_v2       TEXT,
+    pair_status_v2          TEXT,
+    test_lane               TEXT,
+    live_eligibility        TEXT,
+    required_capability     TEXT,
+    risk_flag_count         INTEGER,
+    risk_flags              TEXT,
+    risk_decision           TEXT,
+    risk_action             TEXT,
+    max_allowed_action      TEXT,
+    risk_blockers           TEXT,
+    risk_warnings           TEXT,
+    risk_required_next_step TEXT,
+    risk_policy_reason      TEXT,
+    safety_phase            TEXT,
+    source_csv              TEXT
+);
+""".strip()
+
 # Reserved for FUTURE paper/live phases. Schema-only. The current pipeline must
 # NOT write to this table. Its presence here is a placeholder, not a capability.
 SCHEMA_STATEMENTS["future_position_events"] = """

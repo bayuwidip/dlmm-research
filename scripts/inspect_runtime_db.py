@@ -80,6 +80,7 @@ REQUIRED_TABLES = (
     "pipeline_steps",
     "strategy_observations",
     "risk_flags",
+    "risk_decisions",
     "future_position_events",
 )
 
