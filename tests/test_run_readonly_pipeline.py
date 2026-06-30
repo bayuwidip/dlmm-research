@@ -72,6 +72,10 @@ def make_args(tmp, **overrides):
             "observations_jsonl", rop.DEFAULT_OBSERVATIONS_JSONL
         ),
         import_risk_flags=overrides.get("import_risk_flags", False),
+        import_risk_decisions_db=overrides.get("import_risk_decisions_db", False),
+        risk_decisions_csv=overrides.get(
+            "risk_decisions_csv", rop.DEFAULT_RISK_DECISIONS_CSV
+        ),
     )
     return ns
 
@@ -833,6 +837,54 @@ def _write_observations_jsonl(tmp, records=None, name="strategy_observations.jso
     return path
 
 
+def _write_risk_decisions_csv(tmp, rows=None, name="risk_decisions.csv"):
+    """Write a minimal valid risk decisions CSV and return its path.
+
+    Column set + enum values match import_risk_decisions_to_db's requirements so
+    the real importer accepts it; the forbidden-token guard is satisfied (no
+    uppercase execution-authorization tokens; NOT_LIVE_ELIGIBLE is allowed).
+    """
+    import csv
+
+    columns = [
+        "pair_key", "pair_label", "strategy_class_v2", "pair_status_v2",
+        "test_lane", "live_eligibility", "required_capability", "risk_flag_count",
+        "risk_flags", "risk_decision", "risk_action", "max_allowed_action",
+        "risk_blockers", "risk_warnings", "risk_required_next_step",
+        "risk_policy_reason", "safety_phase",
+    ]
+    if rows is None:
+        rows = [
+            {
+                "pair_key": "AAA-BBB",
+                "pair_label": "AAA-BBB",
+                "strategy_class_v2": "CORE",
+                "pair_status_v2": "WATCHLIST",
+                "test_lane": "OBSERVE",
+                "live_eligibility": "NOT_LIVE_ELIGIBLE",
+                "required_capability": "NONE",
+                "risk_flag_count": "0",
+                "risk_flags": "",
+                "risk_decision": "OBSERVE_ONLY",
+                "risk_action": "CONTINUE_OBSERVATION",
+                "max_allowed_action": "OBSERVE_ONLY",
+                "risk_blockers": "",
+                "risk_warnings": "",
+                "risk_required_next_step": "continue observation",
+                "risk_policy_reason": "stable enough for continued observation",
+                "safety_phase": rop.SAFETY_PHASE,
+            }
+        ]
+    path = Path(tmp) / "data" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=columns)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow(r)
+    return path
+
+
 class ImportObservationsRequiresWriteDbTests(unittest.TestCase):
     """--import-observations-db requires --write-db, enforced before the run."""
 
@@ -1288,6 +1340,431 @@ class ImportObservationsRealDuckDbTests(unittest.TestCase):
             self.assertEqual(counts["obs"], 1)
             self.assertEqual(counts["flags"], 0)
             self.assertEqual(counts["fpe"], 0)
+
+
+# --------------------------------------------------------------------------- #
+# Optional risk-decisions import support (--import-risk-decisions-db)
+# --------------------------------------------------------------------------- #
+
+class ImportRiskDecisionsRequiresWriteDbTests(unittest.TestCase):
+    """--import-risk-decisions-db requires --write-db, enforced before the run."""
+
+    def test_requires_write_db_fails_before_pipeline(self):
+        called = {"execute": False}
+
+        def boom_execute(*a, **k):  # pragma: no cover - must never run
+            called["execute"] = True
+            raise AssertionError("pipeline ran without --write-db")
+
+        original = rop.execute_run
+        rop.execute_run = boom_execute
+        err = io.StringIO()
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                rc = rop.main(["--import-risk-decisions-db"])
+        finally:
+            rop.execute_run = original
+
+        self.assertEqual(rc, 2)
+        self.assertFalse(called["execute"])
+        self.assertIn("--import-risk-decisions-db requires --write-db", err.getvalue())
+
+    def test_requires_write_db_also_blocks_dry_run(self):
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            rc = rop.main(["--dry-run", "--import-risk-decisions-db"])
+        self.assertEqual(rc, 2)
+        self.assertIn("--import-risk-decisions-db requires --write-db", err.getvalue())
+
+
+class ImportRiskDecisionsDryRunTests(unittest.TestCase):
+    def test_dry_run_touches_no_db_and_no_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "runtime" / "dlmm.duckdb"  # does NOT exist
+            csv_path = Path(tmp) / "data" / "risk_decisions.csv"  # does NOT exist
+
+            def boom(name, command):  # pragma: no cover - must never run
+                raise AssertionError("child step executed during dry run")
+
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = rop.main(
+                    [
+                        "--dry-run",
+                        "--write-db", str(db_path),
+                        "--import-risk-decisions-db",
+                        "--risk-decisions-csv", str(csv_path),
+                        "--log-dir", str(Path(tmp) / "logs"),
+                        "--lock-dir", str(Path(tmp) / "locks"),
+                        "--summary-dir", str(Path(tmp) / "summaries"),
+                    ]
+                )
+            self.assertEqual(rc, 0)
+            # No runtime dirs, no DB, no CSV created.
+            self.assertFalse((Path(tmp) / "logs").exists())
+            self.assertFalse((Path(tmp) / "locks").exists())
+            self.assertFalse((Path(tmp) / "summaries").exists())
+            self.assertFalse(db_path.exists())
+            self.assertFalse(db_path.parent.exists())
+            self.assertFalse(csv_path.exists())
+            out = buf.getvalue()
+            self.assertIn("Risk decisions import is PLANNED", out)
+            self.assertIn("NOT executed", out)
+            self.assertIn(str(csv_path), out)
+
+
+class ImportRiskDecisionsMissingFileTests(unittest.TestCase):
+    def test_missing_csv_fails_after_pipeline_runs(self):
+        # apply_risk_policy.py PRODUCES the risk decisions CSV, so the runner must
+        # NOT fail early. The pipeline must run first; only afterwards, if the CSV
+        # is still missing, does the import fail post-pipeline.
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "runtime" / "dlmm.duckdb"
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            db_path.write_text("placeholder")  # passes existence pre-flight
+            missing = Path(tmp) / "data" / "risk_decisions.csv"
+            args = make_args(
+                tmp,
+                write_db=str(db_path),
+                import_risk_decisions_db=True,
+                risk_decisions_csv=str(missing),
+            )
+
+            # Real pipeline steps must execute (recorded via the fake runner).
+            runner = fake_runner_factory({})
+
+            # The risk decisions importer must NEVER be called when the CSV is
+            # missing post-pipeline.
+            def boom_rd(*a, **k):  # pragma: no cover - must never run
+                raise AssertionError("importer called despite missing CSV")
+
+            orig_s = rop.import_run_summary_into_db
+            orig_r = rop.import_risk_decisions_into_db
+            rop.import_run_summary_into_db = lambda p, s: rop.DB_WRITE_SUCCESS
+            rop.import_risk_decisions_into_db = boom_rd
+            err = io.StringIO()
+            try:
+                with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                    rc = rop.execute_run(
+                        args, steps=_ok_steps(), step_runner=runner, now_fn=FakeClock()
+                    )
+            finally:
+                rop.import_run_summary_into_db = orig_s
+                rop.import_risk_decisions_into_db = orig_r
+
+            # Pipeline steps ran FIRST (failure is post-pipeline, not early).
+            self.assertEqual(runner.calls, [name for name, _ in _ok_steps()])
+            # Runner exits non-zero.
+            self.assertNotEqual(rc, 0)
+            self.assertIn(rop.RISK_DEC_MISSING_MSG, err.getvalue())
+            self.assertIn(str(missing), err.getvalue())
+            # Summary artifacts were written and record the failed import.
+            summary = _read_summary_json(args.summary_dir)
+            self.assertEqual(
+                summary["risk_decisions_db_import_status"],
+                rop.RISK_DEC_IMPORT_FAILED,
+            )
+            rd = summary["risk_decisions_db_import"]
+            self.assertTrue(rd["attempted"])
+            self.assertFalse(rd["success"])
+            self.assertIsNone(rd["exit_code"])
+            self.assertEqual(rd["message"], f"{rop.RISK_DEC_MISSING_MSG}: {missing}")
+            # The runner never created the CSV.
+            self.assertFalse(missing.exists())
+            # Runtime dirs WERE created because the pipeline ran.
+            self.assertTrue(Path(args.log_dir).exists())
+            self.assertTrue(Path(args.summary_dir).exists())
+
+
+class ImportRiskDecisionsStatusTests(unittest.TestCase):
+    """Status plumbing via fake importers — runs without duckdb installed."""
+
+    def _existing_db_path(self, tmp):
+        db_path = Path(tmp) / "runtime" / "dlmm.duckdb"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db_path.write_text("placeholder")
+        return db_path
+
+    def test_default_run_does_not_import_risk_decisions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_args(tmp)  # no write_db, no import_risk_decisions_db
+
+            def boom(*a, **k):  # pragma: no cover - must never run
+                raise AssertionError("risk decisions import must not run by default")
+
+            original = rop.import_risk_decisions_into_db
+            rop.import_risk_decisions_into_db = boom
+            try:
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            finally:
+                rop.import_risk_decisions_into_db = original
+
+            self.assertEqual(rc, 0)
+            summary = _read_summary_json(args.summary_dir)
+            self.assertEqual(
+                summary["risk_decisions_db_import_status"],
+                rop.RISK_DEC_IMPORT_NOT_REQUESTED,
+            )
+            self.assertIsNone(summary["risk_decisions_csv"])
+            self.assertFalse(summary["risk_decisions_db_import"]["enabled"])
+            self.assertFalse(summary["risk_decisions_db_import"]["attempted"])
+
+    def test_risk_decisions_imported_after_summary_and_observations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._existing_db_path(tmp)
+            obs = _write_observations_jsonl(tmp)
+            csv_path = _write_risk_decisions_csv(tmp)
+            args = make_args(
+                tmp, write_db=str(db_path),
+                import_observations_db=True, observations_jsonl=str(obs),
+                import_risk_decisions_db=True, risk_decisions_csv=str(csv_path),
+            )
+            order = []
+
+            def fake_summary_import(p, s):
+                order.append("summary")
+                return rop.DB_WRITE_SUCCESS
+
+            def fake_obs_import(p, o, irf):
+                order.append("observations")
+                return rop.OBS_IMPORT_SUCCESS
+
+            rd_calls = []
+
+            def fake_rd_import(p, c):
+                order.append("risk_decisions")
+                rd_calls.append((str(p), str(c)))
+                return rop.RISK_DEC_IMPORT_SUCCESS, 0
+
+            orig_s = rop.import_run_summary_into_db
+            orig_o = rop.import_observations_into_db
+            orig_r = rop.import_risk_decisions_into_db
+            rop.import_run_summary_into_db = fake_summary_import
+            rop.import_observations_into_db = fake_obs_import
+            rop.import_risk_decisions_into_db = fake_rd_import
+            try:
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            finally:
+                rop.import_run_summary_into_db = orig_s
+                rop.import_observations_into_db = orig_o
+                rop.import_risk_decisions_into_db = orig_r
+
+            self.assertEqual(rc, 0)
+            # Risk decisions import runs AFTER summary AND observations.
+            self.assertEqual(order, ["summary", "observations", "risk_decisions"])
+            self.assertEqual(len(rd_calls), 1)
+            self.assertEqual(rd_calls[0][0], str(db_path))
+            self.assertEqual(rd_calls[0][1], str(csv_path))
+            summary = _read_summary_json(args.summary_dir)
+            self.assertEqual(
+                summary["risk_decisions_db_import_status"], rop.RISK_DEC_IMPORT_SUCCESS
+            )
+            self.assertEqual(summary["risk_decisions_csv"], str(csv_path))
+            rd = summary["risk_decisions_db_import"]
+            self.assertTrue(rd["enabled"])
+            self.assertTrue(rd["attempted"])
+            self.assertTrue(rd["success"])
+            self.assertEqual(rd["exit_code"], 0)
+            self.assertIsNone(rd["message"])
+
+    def test_import_failure_makes_runner_exit_nonzero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._existing_db_path(tmp)
+            csv_path = _write_risk_decisions_csv(tmp)
+            args = make_args(
+                tmp, write_db=str(db_path),
+                import_risk_decisions_db=True, risk_decisions_csv=str(csv_path),
+            )
+
+            orig_s = rop.import_run_summary_into_db
+            orig_r = rop.import_risk_decisions_into_db
+            rop.import_run_summary_into_db = lambda p, s: rop.DB_WRITE_SUCCESS
+            rop.import_risk_decisions_into_db = (
+                lambda p, c: (rop.RISK_DEC_IMPORT_FAILED, 1)
+            )
+            try:
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            finally:
+                rop.import_run_summary_into_db = orig_s
+                rop.import_risk_decisions_into_db = orig_r
+
+            # Pipeline + summary import succeeded, but risk decisions import failed.
+            self.assertNotEqual(rc, 0)
+            summary = _read_summary_json(args.summary_dir)
+            self.assertEqual(summary["status"], "SUCCESS")
+            self.assertEqual(summary["db_write_status"], rop.DB_WRITE_SUCCESS)
+            self.assertEqual(
+                summary["risk_decisions_db_import_status"], rop.RISK_DEC_IMPORT_FAILED
+            )
+            rd = summary["risk_decisions_db_import"]
+            self.assertTrue(rd["attempted"])
+            self.assertFalse(rd["success"])
+            self.assertEqual(rd["exit_code"], 1)
+            self.assertIsNotNone(rd["message"])
+
+    def test_summary_json_and_md_include_risk_decisions_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._existing_db_path(tmp)
+            csv_path = _write_risk_decisions_csv(tmp)
+            args = make_args(
+                tmp, write_db=str(db_path),
+                import_risk_decisions_db=True, risk_decisions_csv=str(csv_path),
+            )
+            orig_s = rop.import_run_summary_into_db
+            orig_r = rop.import_risk_decisions_into_db
+            rop.import_run_summary_into_db = lambda p, s: rop.DB_WRITE_SUCCESS
+            rop.import_risk_decisions_into_db = (
+                lambda p, c: (rop.RISK_DEC_IMPORT_SUCCESS, 0)
+            )
+            try:
+                rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            finally:
+                rop.import_run_summary_into_db = orig_s
+                rop.import_risk_decisions_into_db = orig_r
+
+            summary = _read_summary_json(args.summary_dir)
+            for key in (
+                "risk_decisions_db_import_status",
+                "risk_decisions_csv",
+                "risk_decisions_db_import",
+            ):
+                self.assertIn(key, summary)
+            for key in ("enabled", "attempted", "success", "exit_code", "message"):
+                self.assertIn(key, summary["risk_decisions_db_import"])
+
+            md = _read_summary_md(args.summary_dir)
+            self.assertIn("Risk decisions DB import status", md)
+            self.assertIn("Risk decisions CSV", md)
+
+
+@unittest.skipUnless(HAS_DUCKDB, "duckdb not installed")
+class ImportRiskDecisionsRealDuckDbTests(unittest.TestCase):
+    """End-to-end against a real initialized DuckDB via the real importer."""
+
+    def _init_db(self, tmp):
+        db_path = Path(tmp) / "runtime" / "dlmm.duckdb"
+        idb.init_db(str(db_path))
+        return db_path
+
+    def _counts(self, db_path):
+        conn = duckdb.connect(str(db_path))
+        try:
+            return {
+                "runs": conn.execute("SELECT COUNT(*) FROM pipeline_runs").fetchone()[0],
+                "steps": conn.execute(
+                    "SELECT COUNT(*) FROM pipeline_steps"
+                ).fetchone()[0],
+                "obs": conn.execute(
+                    "SELECT COUNT(*) FROM strategy_observations"
+                ).fetchone()[0],
+                "flags": conn.execute("SELECT COUNT(*) FROM risk_flags").fetchone()[0],
+                "decisions": conn.execute(
+                    "SELECT COUNT(*) FROM risk_decisions"
+                ).fetchone()[0],
+                "fpe": conn.execute(
+                    "SELECT COUNT(*) FROM future_position_events"
+                ).fetchone()[0],
+            }
+        finally:
+            conn.close()
+
+    def test_successful_run_imports_risk_decisions_with_upsert(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._init_db(tmp)
+            csv_path = _write_risk_decisions_csv(tmp)
+            args = make_args(
+                tmp, write_db=str(db_path),
+                import_risk_decisions_db=True, risk_decisions_csv=str(csv_path),
+            )
+            with redirect_stdout(io.StringIO()):
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            self.assertEqual(rc, 0)
+            counts = self._counts(db_path)
+            self.assertEqual(counts["runs"], 1)
+            self.assertEqual(counts["decisions"], 1)
+            # Hard boundary: no execution-layer rows ever written.
+            self.assertEqual(counts["fpe"], 0)
+            # No observation/flag rows when those imports are not requested.
+            self.assertEqual(counts["obs"], 0)
+            self.assertEqual(counts["flags"], 0)
+            summary = _read_summary_json(args.summary_dir)
+            self.assertEqual(
+                summary["risk_decisions_db_import_status"], rop.RISK_DEC_IMPORT_SUCCESS
+            )
+
+    def test_upsert_reruns_do_not_duplicate_or_fail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._init_db(tmp)
+            csv_path = _write_risk_decisions_csv(tmp)
+            args = make_args(
+                tmp, write_db=str(db_path),
+                import_risk_decisions_db=True, risk_decisions_csv=str(csv_path),
+            )
+            for _ in range(2):
+                with redirect_stdout(io.StringIO()):
+                    rc = rop.execute_run(
+                        args, steps=_ok_steps(),
+                        step_runner=fake_runner_factory({}), now_fn=FakeClock(),
+                    )
+                self.assertEqual(rc, 0)
+            # Deterministic id + upsert => repeated runs do not duplicate or fail.
+            self.assertEqual(self._counts(db_path)["decisions"], 1)
+
+    def test_observation_import_still_works_alongside_risk_decisions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._init_db(tmp)
+            obs = _write_observations_jsonl(tmp)
+            csv_path = _write_risk_decisions_csv(tmp)
+            args = make_args(
+                tmp, write_db=str(db_path),
+                import_observations_db=True, observations_jsonl=str(obs),
+                import_risk_flags=True,
+                import_risk_decisions_db=True, risk_decisions_csv=str(csv_path),
+            )
+            with redirect_stdout(io.StringIO()):
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            self.assertEqual(rc, 0)
+            counts = self._counts(db_path)
+            # Observation + risk flag import behavior unchanged.
+            self.assertEqual(counts["obs"], 1)
+            self.assertGreaterEqual(counts["flags"], 1)
+            # Risk decisions imported too.
+            self.assertEqual(counts["decisions"], 1)
+            # Hard boundary holds: future_position_events never written.
+            self.assertEqual(counts["fpe"], 0)
+
+    def test_no_future_position_events_write_introduced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._init_db(tmp)
+            csv_path = _write_risk_decisions_csv(tmp)
+            args = make_args(
+                tmp, write_db=str(db_path),
+                import_risk_decisions_db=True, risk_decisions_csv=str(csv_path),
+            )
+            with redirect_stdout(io.StringIO()):
+                rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            self.assertEqual(self._counts(db_path)["fpe"], 0)
 
 
 if __name__ == "__main__":
