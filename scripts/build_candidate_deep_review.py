@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Candidate Deep Review Report v0.1.
+"""Candidate Deep Review Report v0.2.
 
 Purpose:
 - Read an EXISTING runtime DuckDB database and write a read-only Markdown + CSV
@@ -179,8 +179,19 @@ CSV_COLUMNS = (
     "latest_max_allowed_action",
     "risk_flags",
     "risk_flag_count",
+    "risk_decision_count_total",
+    "risk_flag_count_total",
+    "risk_flag_types",
+    "ohlcv_flag_count",
+    "liquidity_flag_count",
+    "volume_flag_count",
+    "volatility_flag_count",
+    "fee_pool_flag_count",
+    "data_quality_flag_count",
+    "malformed_label_flag_count",
     "blocker_history",
     "blocker_count",
+    "latest_blocker_reason",
     "ohlcv_data_notes",
     "liquidity_volume_volatility_notes",
     "data_gaps",
@@ -188,6 +199,29 @@ CSV_COLUMNS = (
     "suggested_human_council_questions",
     "diagnostic_status",
 )
+
+OHLCV_FLAGS = {
+    "OHLCV_UNAVAILABLE",
+    "LOW_DATA_COMPLETENESS",
+    "DATA_NOT_AVAILABLE",
+}
+LIQUIDITY_FLAGS = {"LOW_LIQUIDITY"}
+VOLUME_FLAGS = {"LOW_VOLUME"}
+VOLATILITY_FLAGS = {"HIGH_VOLATILITY", "EXTREME_VOLATILITY"}
+FEE_POOL_FLAGS = {"NO_ELIGIBLE_FEE_POOL", "FEE_TVL_DISTORTION"}
+DATA_QUALITY_FLAGS = {
+    "MALFORMED_PAIR_LABEL",
+    "LOW_DATA_COMPLETENESS",
+    "DATA_NOT_AVAILABLE",
+}
+MALFORMED_LABEL_FLAGS = {"MALFORMED_PAIR_LABEL"}
+BLOCKER_LIKE_REASONS = {
+    "NO_ELIGIBLE_FEE_POOL",
+    "MALFORMED_PAIR_LABEL",
+    "CLASSIFIED_REJECT",
+    "TEST_LANE_QUARANTINE",
+    "NOT_LIVE_ELIGIBLE",
+}
 
 
 def require_duckdb():
@@ -219,6 +253,10 @@ def list_tables(conn):
     return {row[0] for row in rows}
 
 
+def table_columns(conn, name: str) -> set:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info('{name}')").fetchall()}
+
+
 def _rows(conn, sql: str, params=None):
     return conn.execute(sql, params or []).fetchall()
 
@@ -234,6 +272,19 @@ def _clean(value) -> str:
 def _join_or_na(values) -> str:
     cleaned = sorted({v for v in (_clean(x) for x in values) if v})
     return "|".join(cleaned) if cleaned else DATA_NOT_AVAILABLE
+
+
+def _join_or_none(values) -> str:
+    cleaned = sorted({v for v in (_clean(x) for x in values) if v})
+    return "|".join(cleaned) if cleaned else "none"
+
+
+def _split_tokens(value) -> list:
+    raw = _clean(value)
+    if not raw or raw.lower() in {"none", "data_not_available"}:
+        return []
+    normalized = raw.replace(",", "|").replace(";", "|")
+    return [x.strip() for x in normalized.split("|") if x.strip()]
 
 
 def _minmax_or_na(values):
@@ -271,10 +322,17 @@ def gather_flag_rows(conn, present):
 def gather_decision_rows(conn, present):
     if "risk_decisions" not in present:
         return None
+    columns = table_columns(conn, "risk_decisions")
+    policy_col = (
+        "CAST(risk_policy_reason AS VARCHAR) AS risk_policy_reason"
+        if "risk_policy_reason" in columns
+        else "'' AS risk_policy_reason"
+    )
     return _rows(
         conn,
         "SELECT pair_key, pair_label, risk_decision, risk_action, "
         "max_allowed_action, risk_blockers, risk_warnings, "
+        f"{policy_col}, "
         "CAST(imported_at AS VARCHAR) AS imported_at, risk_decision_id "
         "FROM risk_decisions",
     )
@@ -288,7 +346,7 @@ def _new_pair():
         "obs_times": [],
         "flags": [],
         "flag_times": [],
-        "blockers": [],
+        "blocker_events": [],
         "decisions": [],
         "dec_times": [],
     }
@@ -323,6 +381,89 @@ def _default_note_and_status(pair_label: str):
         "consistency before any future design consideration.",
         SAFETY_REVIEW_ONLY,
     )
+
+
+def _count_flags(flags, group) -> int:
+    return sum(1 for flag in flags if _clean(flag) in group)
+
+
+def _flag_types(flags) -> str:
+    return _join_or_none(flags)
+
+
+def _decision_blocker_reasons(decision, blockers, warnings, policy_reason) -> list:
+    decision = _clean(decision)
+    tokens = []
+    for raw in (blockers, warnings, policy_reason):
+        tokens.extend(_split_tokens(raw))
+
+    blocker_reasons = []
+    for token in tokens:
+        if token in BLOCKER_LIKE_REASONS:
+            blocker_reasons.append(token)
+            continue
+        blocker_reasons.extend(
+            reason for reason in BLOCKER_LIKE_REASONS if reason in token
+        )
+    if decision in {"BLOCKED", "REJECTED"}:
+        return blocker_reasons or [decision]
+    return blocker_reasons
+
+
+def _notes_for_flags(ohlcv_count, liquidity_count, volume_count, volatility_count,
+                     fee_pool_count, malformed_count):
+    if ohlcv_count > 0:
+        ohlcv_notes = (
+            "OHLCV/data availability flags observed in runtime history; "
+            "human/council should inspect freshness and continuity before "
+            "future design review."
+        )
+    else:
+        ohlcv_notes = (
+            "No OHLCV/data availability flag found in runtime history; still "
+            "verify freshness and continuity manually."
+        )
+
+    lvv = []
+    if liquidity_count > 0:
+        lvv.append("liquidity flags observed")
+    if volume_count > 0:
+        lvv.append("volume flags observed")
+    if volatility_count > 0:
+        lvv.append("volatility flags observed")
+    if lvv:
+        lvv_notes = (
+            "; ".join(lvv)
+            + "; human/council should inspect pool quality before future design review."
+        )
+    else:
+        lvv_notes = (
+            "No liquidity/volume/volatility flag found in runtime history; "
+            "still verify pool quality manually."
+        )
+
+    gaps = []
+    if fee_pool_count > 0:
+        gaps.append("Fee-pool related flags observed in runtime history")
+    if malformed_count > 0:
+        gaps.append("Malformed label/data-quality flags observed in runtime history")
+    data_gaps = (
+        "; ".join(gaps)
+        if gaps
+        else "No fee-pool or malformed-label data-quality flag found in runtime history."
+    )
+    return ohlcv_notes, lvv_notes, data_gaps
+
+
+def _diagnostic_status(pair_label, malformed_count, fee_pool_count, volatility_count):
+    _, default_status = _default_note_and_status(pair_label)
+    if malformed_count > 0:
+        return NEEDS_DATA_QUALITY_REVIEW
+    if fee_pool_count > 0:
+        return NEEDS_LIQUIDITY_REVIEW
+    if volatility_count > 0:
+        return NEEDS_VOLATILITY_REVIEW
+    return default_status
 
 
 def _is_candidate(rec) -> bool:
@@ -373,7 +514,7 @@ def aggregate_candidates(observation_rows, flag_rows, decision_rows, limit):
         rec["flag_times"].append(observed_at)
 
     for (pair_key, pair_label, decision, action, max_action, blockers, warnings,
-         imported_at, decision_id) in decision_rows:
+         policy_reason, imported_at, decision_id) in decision_rows:
         pk = _clean(pair_key)
         if not pk:
             continue
@@ -381,12 +522,14 @@ def aggregate_candidates(observation_rows, flag_rows, decision_rows, limit):
         rec["labels"].append(pair_label)
         rec["dec_times"].append(imported_at)
         sort_key = (_clean(imported_at), _clean(decision_id))
+        blocker_reasons = _decision_blocker_reasons(
+            decision, blockers, warnings, policy_reason
+        )
         rec["decisions"].append(
             (sort_key, _clean(decision), _clean(action), _clean(max_action))
         )
-        for raw in (_clean(blockers), _clean(warnings)):
-            if raw:
-                rec["blockers"].extend(x.strip() for x in raw.split("|") if x.strip())
+        for reason in blocker_reasons:
+            rec["blocker_events"].append((sort_key, reason))
 
     records = []
     for pk, rec in pairs.items():
@@ -402,15 +545,43 @@ def aggregate_candidates(observation_rows, flag_rows, decision_rows, limit):
         first_seen, last_seen = _minmax_or_na(
             list(rec["obs_times"]) + list(rec["flag_times"]) + list(rec["dec_times"])
         )
-        manual_note, status = _default_note_and_status(pair_label)
+        manual_note, _ = _default_note_and_status(pair_label)
+        risk_flag_types = _flag_types(rec["flags"])
+        risk_flag_count_total = len(rec["flags"])
+        ohlcv_flag_count = _count_flags(rec["flags"], OHLCV_FLAGS)
+        liquidity_flag_count = _count_flags(rec["flags"], LIQUIDITY_FLAGS)
+        volume_flag_count = _count_flags(rec["flags"], VOLUME_FLAGS)
+        volatility_flag_count = _count_flags(rec["flags"], VOLATILITY_FLAGS)
+        fee_pool_flag_count = _count_flags(rec["flags"], FEE_POOL_FLAGS)
+        data_quality_flag_count = _count_flags(rec["flags"], DATA_QUALITY_FLAGS)
+        malformed_label_flag_count = _count_flags(rec["flags"], MALFORMED_LABEL_FLAGS)
+        status = _diagnostic_status(
+            pair_label, malformed_label_flag_count, fee_pool_flag_count,
+            volatility_flag_count
+        )
+        ohlcv_notes, lvv_notes, flag_data_gaps = _notes_for_flags(
+            ohlcv_flag_count, liquidity_flag_count, volume_flag_count,
+            volatility_flag_count, fee_pool_flag_count,
+            malformed_label_flag_count
+        )
+        blocker_events = sorted(
+            rec["blocker_events"], key=lambda event: (event[0], _clean(event[1]))
+        )
+        blocker_reasons = [reason for _, reason in blocker_events if _clean(reason)]
+        blocker_history = _join_or_none(blocker_reasons)
+        blocker_count = len({event[0] for event in blocker_events})
+        latest_blocker_reason = (
+            _clean(blocker_events[-1][1]) if blocker_events else "none"
+        )
 
-        data_gaps = []
+        table_gaps = []
         if not observation_rows:
-            data_gaps.append("strategy_observations table missing or empty")
+            table_gaps.append("strategy_observations table missing or empty")
         if not flag_rows:
-            data_gaps.append("risk_flags table missing or empty")
+            table_gaps.append("risk_flags table missing or empty")
         if not decision_rows:
-            data_gaps.append("risk_decisions table missing or empty")
+            table_gaps.append("risk_decisions table missing or empty")
+        data_gaps = "; ".join([flag_data_gaps] + table_gaps)
 
         questions = (
             "Does the source data confirm token identity and pool quality? "
@@ -436,19 +607,24 @@ def aggregate_candidates(observation_rows, flag_rows, decision_rows, limit):
                 "latest_risk_decision": latest_decision,
                 "latest_risk_action": latest_action,
                 "latest_max_allowed_action": latest_max,
-                "risk_flags": _join_or_na(rec["flags"]),
-                "risk_flag_count": len(rec["flags"]),
-                "blocker_history": _join_or_na(rec["blockers"]),
-                "blocker_count": len([b for b in rec["blockers"] if _clean(b)]),
-                "ohlcv_data_notes": (
-                    "Review OHLCV freshness and continuity from existing history; "
-                    "this report performs no data fetch."
-                ),
-                "liquidity_volume_volatility_notes": (
-                    "Review liquidity, volume, volatility, and pool quality by "
-                    "hand before any future design consideration."
-                ),
-                "data_gaps": "; ".join(data_gaps) if data_gaps else "No missing optional history table detected.",
+                "risk_flags": risk_flag_types,
+                "risk_flag_count": risk_flag_count_total,
+                "risk_decision_count_total": len(rec["decisions"]),
+                "risk_flag_count_total": risk_flag_count_total,
+                "risk_flag_types": risk_flag_types,
+                "ohlcv_flag_count": ohlcv_flag_count,
+                "liquidity_flag_count": liquidity_flag_count,
+                "volume_flag_count": volume_flag_count,
+                "volatility_flag_count": volatility_flag_count,
+                "fee_pool_flag_count": fee_pool_flag_count,
+                "data_quality_flag_count": data_quality_flag_count,
+                "malformed_label_flag_count": malformed_label_flag_count,
+                "blocker_history": blocker_history,
+                "blocker_count": blocker_count,
+                "latest_blocker_reason": latest_blocker_reason,
+                "ohlcv_data_notes": ohlcv_notes,
+                "liquidity_volume_volatility_notes": lvv_notes,
+                "data_gaps": data_gaps,
                 "manual_review_notes": manual_note,
                 "suggested_human_council_questions": questions,
                 "diagnostic_status": status,
@@ -473,6 +649,22 @@ def build_diagnostics(conn, present, limit: int, min_runs: int) -> dict:
     fpe_present = "future_position_events" in present
     fpe_count = table_count(conn, "future_position_events") if fpe_present else None
     fpe_violation = bool(fpe_present and fpe_count and fpe_count > 0)
+    if fpe_violation:
+        return {
+            "fpe_present": fpe_present,
+            "fpe_count": fpe_count,
+            "fpe_violation": True,
+            "run_present": "pipeline_runs" in present,
+            "run_count": None,
+            "observations_present": "strategy_observations" in present,
+            "flags_present": "risk_flags" in present,
+            "decisions_present": "risk_decisions" in present,
+            "distinct_observed_runs": 0,
+            "evidence_runs": 0,
+            "evidence_sufficient": False,
+            "min_runs": min_runs,
+            "records": [],
+        }
 
     run_present = "pipeline_runs" in present
     run_count = table_count(conn, "pipeline_runs") if run_present else None
@@ -535,7 +727,7 @@ def _present_note(flag) -> str:
 def render_markdown(diag: dict, db_path: str, limit: int) -> str:
     records = diag["records"]
     lines = []
-    lines.append("# Candidate Deep Review Report v0.1")
+    lines.append("# Candidate Deep Review Report v0.2")
     lines.append("")
     lines.append(f"- generated_at (UTC): {utc_now_iso()}")
     lines.append(f"- safety_phase: {SAFETY_PHASE}")
@@ -598,6 +790,8 @@ def render_markdown(diag: dict, db_path: str, limit: int) -> str:
             r["distinct_run_count"],
             r["latest_risk_decision"],
             r["latest_max_allowed_action"],
+            r["risk_flag_count_total"],
+            r["blocker_count"],
             r["diagnostic_status"],
             r["manual_review_notes"],
         )
@@ -612,6 +806,8 @@ def render_markdown(diag: dict, db_path: str, limit: int) -> str:
                 "distinct_run_count",
                 "latest_risk_decision",
                 "latest_max_allowed_action",
+                "risk_flag_count_total",
+                "blocker_count",
                 "diagnostic_status",
                 "manual_review_notes",
             ),
@@ -629,8 +825,19 @@ def render_markdown(diag: dict, db_path: str, limit: int) -> str:
         lines.append(f"- latest_risk_decision: {r['latest_risk_decision']}")
         lines.append(f"- latest_risk_action: {r['latest_risk_action']}")
         lines.append(f"- latest_max_allowed_action: {r['latest_max_allowed_action']}")
-        lines.append(f"- risk_flags: {r['risk_flags']}")
+        lines.append(f"- risk_flag_types: {r['risk_flag_types']}")
+        lines.append(f"- risk_flag_count_total: {r['risk_flag_count_total']}")
+        lines.append(f"- ohlcv_flag_count: {r['ohlcv_flag_count']}")
+        lines.append(f"- liquidity_flag_count: {r['liquidity_flag_count']}")
+        lines.append(f"- volume_flag_count: {r['volume_flag_count']}")
+        lines.append(f"- volatility_flag_count: {r['volatility_flag_count']}")
+        lines.append(f"- fee_pool_flag_count: {r['fee_pool_flag_count']}")
+        lines.append(f"- data_quality_flag_count: {r['data_quality_flag_count']}")
+        lines.append(f"- malformed_label_flag_count: {r['malformed_label_flag_count']}")
+        lines.append(f"- risk_decision_count_total: {r['risk_decision_count_total']}")
+        lines.append(f"- blocker_count: {r['blocker_count']}")
         lines.append(f"- blocker_history: {r['blocker_history']}")
+        lines.append(f"- latest_blocker_reason: {r['latest_blocker_reason']}")
         lines.append(f"- ohlcv_data_notes: {r['ohlcv_data_notes']}")
         lines.append(
             "- liquidity_volume_volatility_notes: "
@@ -682,7 +889,7 @@ def write_csv(path: Path, records) -> None:
 
 def print_safety_banner() -> None:
     print("------------------------------------------------------------")
-    print("  CANDIDATE DEEP REVIEW REPORT v0.1")
+    print("  CANDIDATE DEEP REVIEW REPORT v0.2")
     print("------------------------------------------------------------")
     for line in SAFETY_BANNER.splitlines():
         print(f"  {line}")
@@ -764,7 +971,7 @@ def run_report(
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Candidate Deep Review Report v0.1 - read an existing runtime "
+            "Candidate Deep Review Report v0.2 - read an existing runtime "
             "DuckDB database and write a diagnostic-only Markdown + CSV report "
             "for future paper-simulation design review candidates. Read-only; "
             "never writes the DB, never initializes schema, no pipeline run, no "

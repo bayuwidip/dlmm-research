@@ -72,14 +72,14 @@ def _insert_decision(conn, dec_id, pair_key, pair_label,
                      decision="PAPER_REVIEW_CANDIDATE",
                      action="REVIEW_FOR_FUTURE_PAPER_SIMULATION",
                      max_action="FUTURE_PAPER_SIMULATION_REVIEW",
-                     blockers="", warnings="", imported_at=None):
+                     blockers="", warnings="", policy_reason="", imported_at=None):
     conn.execute(
         "INSERT INTO risk_decisions "
         "(risk_decision_id, imported_at, pair_key, pair_label, "
         "strategy_class_v2, pair_status_v2, test_lane, risk_decision, "
         "risk_action, max_allowed_action, risk_blockers, risk_warnings, "
-        "safety_phase) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "risk_policy_reason, safety_phase) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             dec_id,
             imported_at,
@@ -93,6 +93,7 @@ def _insert_decision(conn, dec_id, pair_key, pair_label,
             max_action,
             blockers,
             warnings,
+            policy_reason,
             idb.SAFETY_PHASE,
         ],
     )
@@ -256,8 +257,19 @@ class TestConstants(unittest.TestCase):
                 "latest_max_allowed_action",
                 "risk_flags",
                 "risk_flag_count",
+                "risk_decision_count_total",
+                "risk_flag_count_total",
+                "risk_flag_types",
+                "ohlcv_flag_count",
+                "liquidity_flag_count",
+                "volume_flag_count",
+                "volatility_flag_count",
+                "fee_pool_flag_count",
+                "data_quality_flag_count",
+                "malformed_label_flag_count",
                 "blocker_history",
                 "blocker_count",
+                "latest_blocker_reason",
                 "ohlcv_data_notes",
                 "liquidity_volume_volatility_notes",
                 "data_gaps",
@@ -349,7 +361,7 @@ class TestCandidateDeepReview(unittest.TestCase):
             self.assertTrue(out_md.exists())
             self.assertTrue(out_csv.exists())
             text = out_md.read_text(encoding="utf-8")
-            self.assertIn("# Candidate Deep Review Report v0.1", text)
+            self.assertIn("# Candidate Deep Review Report v0.2", text)
             self.assertIn("generated_at (UTC):", text)
             self.assertIn("Candidate Shortlist", text)
             self.assertIn("Risk/Data Quality Summary", text)
@@ -437,6 +449,128 @@ class TestCandidateDeepReview(unittest.TestCase):
             _, _, out_csv, _ = self._run(db_path, tmp)
             header = out_csv.read_text(encoding="utf-8").splitlines()[0]
             self.assertEqual(header, ",".join(report.CSV_COLUMNS))
+
+    def test_risk_flag_enrichment_columns_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = _make_db(tmp)
+            _, _, out_csv, _ = self._run(db_path, tmp)
+            row = next(_read_csv(out_csv))
+            for column in (
+                "risk_decision_count_total",
+                "risk_flag_count_total",
+                "risk_flag_types",
+                "ohlcv_flag_count",
+                "liquidity_flag_count",
+                "volume_flag_count",
+                "volatility_flag_count",
+                "fee_pool_flag_count",
+                "data_quality_flag_count",
+                "malformed_label_flag_count",
+                "latest_blocker_reason",
+            ):
+                self.assertIn(column, row)
+
+    def test_risk_flag_category_counts_are_derived(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = _make_db(tmp)
+            conn = duckdb.connect(str(db_path))
+            try:
+                for idx, flag in enumerate(
+                    ("OHLCV_UNAVAILABLE", "LOW_DATA_COMPLETENESS", "DATA_NOT_AVAILABLE"),
+                    start=1,
+                ):
+                    _insert_flag(conn, f"flag-ohlcv-{idx}", "mintUSDC|mintSOL", "USDC-SOL", flag)
+                _insert_flag(conn, "flag-liq", "mintJUP|mintSOL", "JUP-SOL", "LOW_LIQUIDITY")
+                _insert_flag(conn, "flag-vol", "mintJUP|mintSOL", "JUP-SOL", "LOW_VOLUME")
+                _insert_flag(conn, "flag-fee", "mintHYPE|mintUSDC", "HYPE-USDC", "NO_ELIGIBLE_FEE_POOL")
+                _insert_flag(conn, "flag-fee2", "mintHYPE|mintUSDC", "HYPE-USDC", "FEE_TVL_DISTORTION")
+                _insert_flag(conn, "flag-malformed", "mintUSDC|mintCBBTC", "USDC-cbBTC", "MALFORMED_PAIR_LABEL")
+                _insert_flag(conn, "flag-high-vol", "mintTRUMP|mintUSDC", "TRUMP-USDC", "HIGH_VOLATILITY")
+                _insert_flag(conn, "flag-extreme-vol", "mintTRUMP|mintUSDC", "TRUMP-USDC", "EXTREME_VOLATILITY")
+            finally:
+                conn.close()
+
+            _, _, out_csv, _ = self._run(db_path, tmp)
+            by_label = {r["pair_label"]: r for r in _read_csv(out_csv)}
+            self.assertEqual(by_label["USDC-SOL"]["ohlcv_flag_count"], "3")
+            self.assertEqual(by_label["JUP-SOL"]["liquidity_flag_count"], "1")
+            self.assertEqual(by_label["JUP-SOL"]["volume_flag_count"], "1")
+            self.assertEqual(by_label["TRUMP-USDC"]["volatility_flag_count"], "2")
+            self.assertEqual(by_label["HYPE-USDC"]["fee_pool_flag_count"], "2")
+            self.assertEqual(by_label["USDC-cbBTC"]["malformed_label_flag_count"], "1")
+            self.assertEqual(by_label["USDC-cbBTC"]["data_quality_flag_count"], "1")
+            self.assertIn("OHLCV/data availability flags observed", by_label["USDC-SOL"]["ohlcv_data_notes"])
+            self.assertIn("liquidity flags observed", by_label["JUP-SOL"]["liquidity_volume_volatility_notes"])
+            self.assertIn("volume flags observed", by_label["JUP-SOL"]["liquidity_volume_volatility_notes"])
+            self.assertIn("volatility flags observed", by_label["TRUMP-USDC"]["liquidity_volume_volatility_notes"])
+            self.assertIn("Fee-pool related flags", by_label["HYPE-USDC"]["data_gaps"])
+            self.assertIn("Malformed label/data-quality flags", by_label["USDC-cbBTC"]["data_gaps"])
+
+    def test_blocker_count_separates_total_decisions_from_actual_blockers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = _make_db(tmp)
+            conn = duckdb.connect(str(db_path))
+            try:
+                _insert_decision(
+                    conn,
+                    "dec-hype-usdc-fee-blocker",
+                    "mintHYPE|mintUSDC",
+                    "HYPE-USDC",
+                    blockers="NO_ELIGIBLE_FEE_POOL",
+                    imported_at="2026-06-30T12:30:00",
+                )
+                _insert_decision(
+                    conn,
+                    "dec-hype-sol-blocked",
+                    "mintHYPE|mintSOL",
+                    "HYPE-SOL",
+                    decision="BLOCKED",
+                    action="FIX_DATA_OR_CLASSIFICATION",
+                    max_action="NONE",
+                    imported_at="2026-06-30T12:00:00",
+                )
+                _insert_decision(
+                    conn,
+                    "dec-trump-policy-blocker",
+                    "mintTRUMP|mintUSDC",
+                    "TRUMP-USDC",
+                    policy_reason="CLASSIFIED_REJECT",
+                    imported_at="2026-06-30T12:00:00",
+                )
+            finally:
+                conn.close()
+
+            _, _, out_csv, _ = self._run(db_path, tmp)
+            by_label = {r["pair_label"]: r for r in _read_csv(out_csv)}
+            self.assertEqual(by_label["USDC-SOL"]["blocker_history"], "none")
+            self.assertEqual(by_label["USDC-SOL"]["blocker_count"], "0")
+            self.assertGreater(
+                int(by_label["USDC-SOL"]["risk_decision_count_total"]),
+                int(by_label["USDC-SOL"]["blocker_count"]),
+            )
+            self.assertEqual(by_label["HYPE-USDC"]["blocker_count"], "1")
+            self.assertEqual(by_label["HYPE-USDC"]["blocker_history"], "NO_ELIGIBLE_FEE_POOL")
+            self.assertEqual(by_label["HYPE-USDC"]["latest_blocker_reason"], "NO_ELIGIBLE_FEE_POOL")
+            self.assertEqual(by_label["HYPE-SOL"]["blocker_count"], "1")
+            self.assertEqual(by_label["HYPE-SOL"]["blocker_history"], "BLOCKED")
+            self.assertEqual(by_label["TRUMP-USDC"]["blocker_history"], "CLASSIFIED_REJECT")
+
+    def test_diagnostic_status_upgrades_from_flag_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = _make_db(tmp)
+            conn = duckdb.connect(str(db_path))
+            try:
+                _insert_flag(conn, "flag-malformed-upgrade", "mintHYPE|mintSOL", "HYPE-SOL", "MALFORMED_PAIR_LABEL")
+                _insert_flag(conn, "flag-fee-upgrade", "mintHYPE|mintUSDC", "HYPE-USDC", "NO_ELIGIBLE_FEE_POOL")
+                _insert_flag(conn, "flag-vol-upgrade", "mintUSDC|mintSOL", "USDC-SOL", "HIGH_VOLATILITY")
+            finally:
+                conn.close()
+
+            _, _, out_csv, _ = self._run(db_path, tmp)
+            by_label = {r["pair_label"]: r for r in _read_csv(out_csv)}
+            self.assertEqual(by_label["HYPE-SOL"]["diagnostic_status"], "NEEDS_DATA_QUALITY_REVIEW")
+            self.assertEqual(by_label["HYPE-USDC"]["diagnostic_status"], "NEEDS_LIQUIDITY_REVIEW")
+            self.assertEqual(by_label["USDC-SOL"]["diagnostic_status"], "NEEDS_VOLATILITY_REVIEW")
 
     def test_missing_optional_tables_do_not_crash(self):
         with tempfile.TemporaryDirectory() as tmp:
