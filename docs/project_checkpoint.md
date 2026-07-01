@@ -1,4 +1,4 @@
-**NEXT TASK ->** project-housekeeping-helper — add a repo-owner housekeeping helper for task_queue/checkpoint updates after merged PRs. Documentation/tooling only; no runtime trading, wallet, signing, swap, LP, rebalance, live execution, signal generation, paper position creation, or `future_position_events` writes.
+**NEXT TASK ->** dev-loop-host-commit-wrapper — Add a host-side commit/PR wrapper for run_dev_loop outputs when Codex sandbox cannot write .git metadata. Acceptance: detects changed files after a successful agent run, creates a branch on the host, stages allowed files only, commits with a generated message, opens PR with validation summary, refuses generated runtime/report artifacts unless explicitly allowed, tests pass, no runtime/trading/wallet behavior.
 
 # DLMM Project Checkpoint
 
@@ -812,3 +812,15 @@ Scope of next task:
 Important:
 This helper reduces stale-doc/queue errors. It does not by itself fix Codex sandbox Git metadata being read-only; commit/PR may still need host-side handling until a separate dev-loop commit wrapper is implemented.
 
+## Checkpoint: Project Housekeeping Helper Done; Host Commit Wrapper Queued
+
+Status: housekeeping update on 2026-07-01.
+
+Completed and merged:
+- project-housekeeping-helper
+
+Current next task:
+- dev-loop-host-commit-wrapper
+
+Notes:
+PR #43 merged the repo-owner housekeeping helper. The next bottleneck is Codex sandbox .git read-only behavior, so the next task is a host-side commit/PR wrapper for safe dev-loop outputs.
