@@ -24,6 +24,17 @@ REVIEW | merged-task | Merged task description unchanged.
 """
 
 
+QUEUE_WITH_READY = """# Task Queue (manually curated -- only the repo owner adds/reorders lines)
+#
+# Format:
+# STATUS | task-id | one-line description + short acceptance criteria
+
+DONE | old-task | Already merged.
+REVIEW | merged-task | Merged task description unchanged.
+READY | next-task | Existing owner-curated task.
+"""
+
+
 CHECKPOINT = """**NEXT TASK ->** merged-task — Merged task description unchanged.
 
 # DLMM Project Checkpoint
@@ -43,15 +54,13 @@ class QueueUpdateTests(unittest.TestCase):
         self.assertEqual(done_task.description, "Merged task description unchanged.")
         self.assertIsNone(next_task)
 
-    def test_optionally_appends_one_ready_task(self):
-        updated, _, next_task = hk.update_queue(
-            QUEUE,
-            "merged-task",
-            next_task_id="next-task",
-            next_task_description="Next owner-curated task.",
-        )
+    def test_reports_existing_ready_task_without_adding_lines(self):
+        updated, _, next_task = hk.update_queue(QUEUE_WITH_READY, "merged-task")
 
-        self.assertTrue(updated.endswith("READY | next-task | Next owner-curated task.\n"))
+        self.assertEqual(
+            len(updated.splitlines()),
+            len(QUEUE_WITH_READY.splitlines()),
+        )
         self.assertEqual(next_task.task_id, "next-task")
         self.assertEqual(next_task.status, "READY")
 
@@ -74,19 +83,10 @@ class QueueUpdateTests(unittest.TestCase):
         with self.assertRaisesRegex(hk.HousekeepingError, "contains BLOCKED"):
             hk.update_queue(bad_queue, "merged-task")
 
-    def test_next_task_args_must_be_paired(self):
-        with self.assertRaisesRegex(hk.HousekeepingError, "provided together"):
-            hk.update_queue(QUEUE, "merged-task", next_task_id="next-task")
-
 
 class CheckpointUpdateTests(unittest.TestCase):
     def test_updates_next_task_line_and_appends_checkpoint_entry(self):
-        queue_after, done_task, next_task = hk.update_queue(
-            QUEUE,
-            "merged-task",
-            next_task_id="next-task",
-            next_task_description="Next owner-curated task.",
-        )
+        queue_after, done_task, next_task = hk.update_queue(QUEUE_WITH_READY, "merged-task")
         self.assertIn("READY | next-task", queue_after)
 
         updated = hk.update_checkpoint(
@@ -100,7 +100,7 @@ class CheckpointUpdateTests(unittest.TestCase):
 
         self.assertTrue(
             updated.startswith(
-                "**NEXT TASK ->** next-task — Next owner-curated task.\n"
+                "**NEXT TASK ->** next-task — Existing owner-curated task.\n"
             )
         )
         self.assertIn("## Checkpoint: Merged Task Completed", updated)
@@ -140,7 +140,7 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             queue_path = Path(tmp) / "task_queue.md"
             checkpoint_path = Path(tmp) / "project_checkpoint.md"
-            queue_path.write_text(QUEUE, encoding="utf-8")
+            queue_path.write_text(QUEUE_WITH_READY, encoding="utf-8")
             checkpoint_path.write_text(CHECKPOINT, encoding="utf-8")
 
             out = io.StringIO()
@@ -149,10 +149,6 @@ class CliTests(unittest.TestCase):
                     [
                         "--done-task-id",
                         "merged-task",
-                        "--next-task-id",
-                        "next-task",
-                        "--next-task-description",
-                        "Next owner-curated task.",
                         "--checkpoint-title",
                         "Merged Task Completed",
                         "--checkpoint-body",
@@ -169,8 +165,8 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(rc, 0)
             self.assertIn("---", out.getvalue())
-            self.assertIn("+READY | next-task | Next owner-curated task.", out.getvalue())
-            self.assertEqual(queue_path.read_text(encoding="utf-8"), QUEUE)
+            self.assertNotIn("+READY | next-task", out.getvalue())
+            self.assertEqual(queue_path.read_text(encoding="utf-8"), QUEUE_WITH_READY)
             self.assertEqual(checkpoint_path.read_text(encoding="utf-8"), CHECKPOINT)
 
     def test_cli_writes_both_docs(self):
@@ -195,7 +191,7 @@ class CliTests(unittest.TestCase):
                         "--checkpoint",
                         str(checkpoint_path),
                     ]
-                )
+            )
 
             self.assertEqual(rc, 0)
             self.assertIn("Marked DONE: merged-task", out.getvalue())
@@ -204,6 +200,52 @@ class CliTests(unittest.TestCase):
                 "## Checkpoint: Merged Task Completed",
                 checkpoint_path.read_text(encoding="utf-8"),
             )
+
+    def test_cli_rejects_next_task_id_argument(self):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            with self.assertRaises(SystemExit) as ctx:
+                hk.main(
+                    [
+                        "--done-task-id",
+                        "merged-task",
+                        "--next-task-id",
+                        "next-task",
+                        "--checkpoint-title",
+                        "Title",
+                    ]
+                )
+
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("unrecognized arguments: --next-task-id next-task", err.getvalue())
+
+    def test_cli_preserves_task_queue_line_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue_path = Path(tmp) / "task_queue.md"
+            checkpoint_path = Path(tmp) / "project_checkpoint.md"
+            queue_path.write_text(QUEUE_WITH_READY, encoding="utf-8")
+            checkpoint_path.write_text(CHECKPOINT, encoding="utf-8")
+            before_line_count = len(queue_path.read_text(encoding="utf-8").splitlines())
+
+            with redirect_stdout(io.StringIO()):
+                rc = hk.main(
+                    [
+                        "--done-task-id",
+                        "merged-task",
+                        "--checkpoint-title",
+                        "Merged Task Completed",
+                        "--date",
+                        "2026-07-01",
+                        "--task-queue",
+                        str(queue_path),
+                        "--checkpoint",
+                        str(checkpoint_path),
+                    ]
+                )
+
+            after_line_count = len(queue_path.read_text(encoding="utf-8").splitlines())
+            self.assertEqual(rc, 0)
+            self.assertEqual(after_line_count, before_line_count)
 
     def test_cli_reports_validation_error(self):
         with tempfile.TemporaryDirectory() as tmp:

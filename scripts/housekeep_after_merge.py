@@ -5,9 +5,12 @@ Repo-owner housekeeping helper for merged PRs.
 This tool updates docs/task_queue.md and docs/project_checkpoint.md after one
 queued PR has been manually merged:
 - marks exactly one REVIEW task as DONE
-- optionally appends exactly one READY task
+- reports the first existing READY task as the next task
 - appends one checkpoint entry
 - validates task queue consistency before writing
+
+This tool cannot add tasks. New docs/task_queue.md lines are added only by the
+repo owner, directly, outside this tool.
 
 It is documentation/tooling only. It does not run the DLMM pipeline, read or
 write runtime storage, create positions, or perform any market action.
@@ -173,10 +176,9 @@ def append_checkpoint_entry(checkpoint_text: str, entry: str) -> str:
 def update_queue(
     queue_text: str,
     done_task_id: str,
-    next_task_id: Optional[str] = None,
-    next_task_description: Optional[str] = None,
 ) -> Tuple[str, QueueTask, Optional[QueueTask]]:
     lines, trailing = split_lines(queue_text)
+    original_line_count = len(lines)
     tasks = validate_queue_text(queue_text)
     matches = [task for task in tasks if task.task_id == done_task_id]
     if not matches:
@@ -188,21 +190,14 @@ def update_queue(
             f"(found {done_task.status})"
         )
 
-    if (next_task_id is None) != (next_task_description is None):
-        raise HousekeepingError(
-            "--next-task-id and --next-task-description must be provided together"
-        )
-    if next_task_id and any(task.task_id == next_task_id for task in tasks):
-        raise HousekeepingError(f"Next task already exists in queue: {next_task_id}")
-
     lines[done_task.line_index] = f"DONE | {done_task.task_id} | {done_task.description}"
-    next_task = None
-    if next_task_id:
-        line = f"READY | {next_task_id} | {next_task_description}"
-        lines.append(line)
-        next_task = QueueTask("READY", next_task_id, next_task_description or "", len(lines) - 1)
+    assert len(lines) <= original_line_count, "task queue line count must never increase"
 
     updated_text = join_lines(lines, trailing_newline=trailing)
+    updated_lines, _ = split_lines(updated_text)
+    assert (
+        len(updated_lines) <= original_line_count
+    ), "task queue line count must never increase"
     updated_tasks = validate_queue_text(updated_text)
     next_task = first_ready_task(updated_tasks)
     return updated_text, done_task, next_task
@@ -240,17 +235,13 @@ def unified_diff(path: Path, before: str, after: str) -> str:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Update task_queue/checkpoint after one merged PR."
+        description=(
+            "Update task_queue/checkpoint after one merged PR. This tool cannot "
+            "add tasks; new queue lines are added only by the repo owner, "
+            "directly, outside this tool."
+        )
     )
     parser.add_argument("--done-task-id", required=True, help="REVIEW task to mark DONE")
-    parser.add_argument(
-        "--next-task-id",
-        help="Optional new READY task id to append to docs/task_queue.md",
-    )
-    parser.add_argument(
-        "--next-task-description",
-        help="Optional new READY task description and acceptance criteria",
-    )
     parser.add_argument(
         "--checkpoint-title",
         required=True,
@@ -295,8 +286,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         queue_after, done_task, next_task = update_queue(
             queue_before,
             done_task_id=args.done_task_id,
-            next_task_id=args.next_task_id,
-            next_task_description=args.next_task_description,
         )
         checkpoint_after = update_checkpoint(
             checkpoint_before,
