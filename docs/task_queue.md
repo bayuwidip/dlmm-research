@@ -18,4 +18,4 @@
 #   part of the same PR as the task itself.
 # - run_dev_loop.sh stops completely if it finds a new BLOCKED line.
 
-READY | manual-council-review-matrix | Build a read-only Manual Council Review Matrix for the 6 stable review candidates, per project_checkpoint.md section 3h/3i. Acceptance: report per candidate + manual review questions, does not change candidate status, does not touch future_position_events.
+REVIEW | manual-council-review-matrix | Build a read-only Manual Council Review Matrix for the 6 stable review candidates, per project_checkpoint.md section 3h/3i. Acceptance: report per candidate + manual review questions, does not change candidate status, does not touch future_position_events.
