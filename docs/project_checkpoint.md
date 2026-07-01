@@ -1,4 +1,4 @@
-**NEXT TASK ->** dev-loop-host-commit-wrapper — Add a host-side commit/PR wrapper for run_dev_loop outputs when Codex sandbox cannot write .git metadata. Acceptance: detects changed files after a successful agent run, creates a branch on the host, stages allowed files only, commits with a generated message, opens PR with validation summary, refuses generated runtime/report artifacts unless explicitly allowed, tests pass, no runtime/trading/wallet behavior.
+**NEXT TASK ->** scheduled-runner-cron-dry-run — Add a safe cron/systemd dry-run scheduling guide for the scheduled read-only diagnostics runner. Acceptance: documentation only, includes exact cron/systemd example commands, lock/log paths, disable/remove instructions, and safety checklist. Does not enable scheduling automatically, no wallet/live/paper-position capability.
 
 # DLMM Project Checkpoint
 
@@ -824,3 +824,16 @@ Current next task:
 
 Notes:
 PR #43 merged the repo-owner housekeeping helper. The next bottleneck is Codex sandbox .git read-only behavior, so the next task is a host-side commit/PR wrapper for safe dev-loop outputs.
+
+## Checkpoint: Host Commit Wrapper Done; Cron Dry-Run Guide Queued
+
+Status: housekeeping update on 2026-07-01.
+
+Completed and merged:
+- dev-loop-host-commit-wrapper
+
+Current next task:
+- scheduled-runner-cron-dry-run
+
+Notes:
+PR #45 merged the host-side commit/PR wrapper. The next step is a documentation-only cron/systemd dry-run guide for safe scheduled read-only diagnostics automation.
