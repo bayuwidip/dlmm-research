@@ -103,6 +103,20 @@ Do not merge. Do not start another task. Done.
 EOF
 )
 
+  if [ "$ENGINE" = "codex" ]; then
+    prompt=$(cat <<EOF
+$prompt
+
+HOST-SIDE GIT FALLBACK FOR CODEX:
+If git branch creation, commit, push, or PR creation fails because .git metadata is
+read-only in the Codex sandbox, do not treat that as an implementation failure.
+Leave the validated working-tree changes in place. After Codex exits successfully,
+run_dev_loop.sh will call scripts/commit_dev_loop_output.py on the host to create
+the branch, stage allowed files only, commit, push, and open the PR.
+EOF
+)
+  fi
+
   log_file="$LOG_DIR/$(date +%Y%m%d-%H%M%S)-${task_id}.log"
 
   # ENGINE=codex is only a fallback implementation engine for cases where
@@ -127,6 +141,12 @@ EOF
   fi
 
   if "${engine_cmd[@]}" > "$log_file" 2>&1; then
+    if [ "$ENGINE" = "codex" ]; then
+      log "Running host-side commit/PR wrapper for Codex output."
+      python3 scripts/commit_dev_loop_output.py \
+        --task-id "$task_id" \
+        --agent-log "$log_file" >> "$log_file" 2>&1
+    fi
     log "Task $task_id finished executing (check $log_file for the PR result)."
   else
     log "Task $task_id FAILED (non-zero exit code). Loop stopping. Check $log_file."
