@@ -695,3 +695,48 @@ Before coding, agents must:
 ---
 
 *Not financial advice. Research only. No live execution in this phase.*
+
+---
+
+## Checkpoint: Task Queue Synced After Matrix Pipeline Wiring
+
+Status: documentation sync after PR #35.
+
+Completed and merged:
+- manual-council-review-matrix
+- wire-matrix-into-pipeline
+
+Current task queue state:
+- DONE: manual-council-review-matrix
+- DONE: wire-matrix-into-pipeline
+- READY: scheduled-readonly-runner
+
+Current next task:
+- scheduled-readonly-runner
+
+Reason:
+The project objective is automation-first. The next safe automation step is a scheduled read-only diagnostics runner for VPS automation. This reduces manual copy-paste without introducing paper positions, wallet usage, signing, swaps, LP add/remove, rebalance, or live execution.
+
+Scope of next task:
+- read-only diagnostics only
+- local lock file to prevent overlapping runs
+- local logs
+- dry-run mode
+- future_position_events count check
+- no wallet
+- no private key
+- no seed phrase
+- no signing
+- no swap
+- no LP add/remove
+- no rebalance
+- no live execution
+- no signal generation
+- no paper position creation
+- no future_position_events writes
+- no threshold changes
+- no risk-policy changes
+- no candidate-status changes
+
+Important:
+scheduled-readonly-runner is not a paper engine and not a live bot. It is only an automation wrapper for read-only diagnostics.
