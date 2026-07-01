@@ -5,6 +5,16 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QUEUE_FILE="$REPO_DIR/docs/task_queue.md"
 LOG_DIR="$REPO_DIR/logs/dev_loop"
 MAX_TASKS="${MAX_TASKS:-1}"
+ENGINE="${ENGINE:-claude}"
+
+case "$ENGINE" in
+  claude|codex)
+    ;;
+  *)
+    echo "Unknown ENGINE '$ENGINE'. Supported values: claude, codex." >&2
+    exit 2
+    ;;
+esac
 
 mkdir -p "$LOG_DIR"
 cd "$REPO_DIR"
@@ -94,13 +104,29 @@ EOF
 )
 
   log_file="$LOG_DIR/$(date +%Y%m%d-%H%M%S)-${task_id}.log"
-  log "Running Claude Code headless, log: $log_file"
 
-  if claude -p "$prompt" \
-      --allowedTools "Read,Edit,Write,Bash(git:*),Bash(python3:*),Bash(gh:*),Bash(grep:*)" \
-      --max-turns 40 \
-      --output-format json \
-      > "$log_file" 2>&1; then
+  # ENGINE=codex is only a fallback implementation engine for cases where
+  # Claude Code is rate-limited. It must still follow CLAUDE.md and AGENTS.md
+  # safety rules, including PR-only workflow and no live execution.
+  if [ "$ENGINE" = "claude" ]; then
+    log "Running Claude Code headless, log: $log_file"
+    engine_cmd=(
+      claude -p "$prompt"
+      --allowedTools "Read,Edit,Write,Bash(git:*),Bash(python3:*),Bash(gh:*),Bash(grep:*)"
+      --max-turns 40
+      --output-format json
+    )
+  else
+    log "Running Codex CLI headless, log: $log_file"
+    engine_cmd=(
+      codex exec
+      --sandbox workspace-write
+      --cd "$REPO_DIR"
+      "$prompt"
+    )
+  fi
+
+  if "${engine_cmd[@]}" > "$log_file" 2>&1; then
     log "Task $task_id finished executing (check $log_file for the PR result)."
   else
     log "Task $task_id FAILED (non-zero exit code). Loop stopping. Check $log_file."
