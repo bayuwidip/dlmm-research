@@ -1,4 +1,4 @@
-**NEXT TASK ->** update-readme-project-status — Update README.md to reflect the current DLMM project status and safe workflow. Documentation only; no runtime/trading/wallet behavior.
+**NEXT TASK ->** NONE — no READY task currently queued.
 
 # DLMM Project Checkpoint
 
@@ -876,3 +876,13 @@ Current next task:
 
 Notes:
 The 24h cron dry-run task remains useful later, but the repo README should be updated first so the project landing page reflects the current safety phase, dev-loop workflow, host-side PR wrapper, scheduled dry-run documentation, and optional RTK guidance.
+
+## Checkpoint: Paper Simulation Design v0.1 merged (PR #54)
+
+Status: housekeeping update on 2026-07-01.
+
+Completed and merged:
+- paper-simulation-design-v0-1
+
+Current next task:
+- NONE
