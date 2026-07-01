@@ -76,6 +76,15 @@ def make_args(tmp, **overrides):
         risk_decisions_csv=overrides.get(
             "risk_decisions_csv", rop.DEFAULT_RISK_DECISIONS_CSV
         ),
+        build_manual_council_review_matrix=overrides.get(
+            "build_manual_council_review_matrix", False
+        ),
+        manual_council_review_matrix_md=overrides.get(
+            "manual_council_review_matrix_md", rop.DEFAULT_MATRIX_OUT_MD
+        ),
+        manual_council_review_matrix_csv=overrides.get(
+            "manual_council_review_matrix_csv", rop.DEFAULT_MATRIX_OUT_CSV
+        ),
     )
     return ns
 
@@ -1765,6 +1774,269 @@ class ImportRiskDecisionsRealDuckDbTests(unittest.TestCase):
                     now_fn=FakeClock(),
                 )
             self.assertEqual(self._counts(db_path)["fpe"], 0)
+
+
+# --------------------------------------------------------------------------- #
+# Optional Manual Council Review Matrix support
+# (--build-manual-council-review-matrix)
+# --------------------------------------------------------------------------- #
+
+class ManualCouncilReviewMatrixRequiresWriteDbTests(unittest.TestCase):
+    """--build-manual-council-review-matrix requires --write-db before work."""
+
+    def test_requires_write_db_fails_before_pipeline(self):
+        called = {"execute": False}
+
+        def boom_execute(*a, **k):  # pragma: no cover - must never run
+            called["execute"] = True
+            raise AssertionError("pipeline ran without --write-db")
+
+        original = rop.execute_run
+        rop.execute_run = boom_execute
+        err = io.StringIO()
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                rc = rop.main(["--build-manual-council-review-matrix"])
+        finally:
+            rop.execute_run = original
+
+        self.assertEqual(rc, 2)
+        self.assertFalse(called["execute"])
+        self.assertIn(
+            "--build-manual-council-review-matrix requires --write-db",
+            err.getvalue(),
+        )
+
+    def test_requires_write_db_also_blocks_dry_run(self):
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            rc = rop.main(["--dry-run", "--build-manual-council-review-matrix"])
+        self.assertEqual(rc, 2)
+        self.assertIn(
+            "--build-manual-council-review-matrix requires --write-db",
+            err.getvalue(),
+        )
+
+
+class ManualCouncilReviewMatrixDryRunTests(unittest.TestCase):
+    def test_dry_run_touches_no_db_dirs_or_matrix_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "runtime" / "dlmm.duckdb"  # does NOT exist
+            out_md = Path(tmp) / "reports" / "matrix.md"
+            out_csv = Path(tmp) / "reports" / "matrix.csv"
+
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = rop.main(
+                    [
+                        "--dry-run",
+                        "--write-db", str(db_path),
+                        "--build-manual-council-review-matrix",
+                        "--manual-council-review-matrix-md", str(out_md),
+                        "--manual-council-review-matrix-csv", str(out_csv),
+                        "--log-dir", str(Path(tmp) / "logs"),
+                        "--lock-dir", str(Path(tmp) / "locks"),
+                        "--summary-dir", str(Path(tmp) / "summaries"),
+                    ]
+                )
+            self.assertEqual(rc, 0)
+            self.assertFalse((Path(tmp) / "logs").exists())
+            self.assertFalse((Path(tmp) / "locks").exists())
+            self.assertFalse((Path(tmp) / "summaries").exists())
+            self.assertFalse(db_path.exists())
+            self.assertFalse(out_md.exists())
+            self.assertFalse(out_csv.exists())
+            out = buf.getvalue()
+            self.assertIn("Manual Council Review Matrix build is PLANNED", out)
+            self.assertIn("NOT executed", out)
+            self.assertIn(str(out_md), out)
+            self.assertIn(str(out_csv), out)
+
+
+class ManualCouncilReviewMatrixStatusTests(unittest.TestCase):
+    """Status plumbing via fake builder — runs without duckdb installed."""
+
+    def _existing_db_path(self, tmp):
+        db_path = Path(tmp) / "runtime" / "dlmm.duckdb"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db_path.write_text("placeholder")
+        return db_path
+
+    def test_default_run_does_not_build_matrix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_args(tmp)
+
+            def boom(*a, **k):  # pragma: no cover - must never run
+                raise AssertionError("matrix builder must not run by default")
+
+            original = rop.build_manual_council_review_matrix
+            rop.build_manual_council_review_matrix = boom
+            try:
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            finally:
+                rop.build_manual_council_review_matrix = original
+
+            self.assertEqual(rc, 0)
+            summary = _read_summary_json(args.summary_dir)
+            matrix = summary["manual_council_review_matrix"]
+            self.assertFalse(matrix["enabled"])
+            self.assertFalse(matrix["attempted"])
+            self.assertEqual(matrix["status"], rop.MATRIX_BUILD_NOT_REQUESTED)
+            self.assertIsNone(matrix["out_md"])
+            self.assertIsNone(matrix["out_csv"])
+
+    def test_matrix_build_runs_after_existing_optional_imports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._existing_db_path(tmp)
+            obs = _write_observations_jsonl(tmp)
+            csv_path = _write_risk_decisions_csv(tmp)
+            out_md = Path(tmp) / "reports" / "matrix.md"
+            out_csv = Path(tmp) / "reports" / "matrix.csv"
+            args = make_args(
+                tmp,
+                write_db=str(db_path),
+                import_observations_db=True,
+                observations_jsonl=str(obs),
+                import_risk_decisions_db=True,
+                risk_decisions_csv=str(csv_path),
+                build_manual_council_review_matrix=True,
+                manual_council_review_matrix_md=str(out_md),
+                manual_council_review_matrix_csv=str(out_csv),
+            )
+            order = []
+
+            def fake_summary_import(p, s):
+                order.append("summary")
+                return rop.DB_WRITE_SUCCESS
+
+            def fake_obs_import(p, o, irf):
+                order.append("observations")
+                return rop.OBS_IMPORT_SUCCESS
+
+            def fake_rd_import(p, c):
+                order.append("risk_decisions")
+                return rop.RISK_DEC_IMPORT_SUCCESS, 0
+
+            matrix_calls = []
+
+            def fake_matrix_build(db, md, csv):
+                order.append("matrix")
+                matrix_calls.append((str(db), str(md), str(csv)))
+                return rop.MATRIX_BUILD_SUCCESS, 0
+
+            orig_s = rop.import_run_summary_into_db
+            orig_o = rop.import_observations_into_db
+            orig_r = rop.import_risk_decisions_into_db
+            orig_m = rop.build_manual_council_review_matrix
+            rop.import_run_summary_into_db = fake_summary_import
+            rop.import_observations_into_db = fake_obs_import
+            rop.import_risk_decisions_into_db = fake_rd_import
+            rop.build_manual_council_review_matrix = fake_matrix_build
+            try:
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            finally:
+                rop.import_run_summary_into_db = orig_s
+                rop.import_observations_into_db = orig_o
+                rop.import_risk_decisions_into_db = orig_r
+                rop.build_manual_council_review_matrix = orig_m
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(
+                order, ["summary", "observations", "risk_decisions", "matrix"]
+            )
+            self.assertEqual(matrix_calls, [(str(db_path), str(out_md), str(out_csv))])
+            summary = _read_summary_json(args.summary_dir)
+            matrix = summary["manual_council_review_matrix"]
+            self.assertTrue(matrix["enabled"])
+            self.assertTrue(matrix["attempted"])
+            self.assertTrue(matrix["success"])
+            self.assertEqual(matrix["status"], rop.MATRIX_BUILD_SUCCESS)
+            self.assertEqual(matrix["exit_code"], 0)
+            self.assertIsNone(matrix["message"])
+
+    def test_matrix_build_failure_makes_runner_exit_nonzero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._existing_db_path(tmp)
+            args = make_args(
+                tmp,
+                write_db=str(db_path),
+                build_manual_council_review_matrix=True,
+            )
+
+            orig_s = rop.import_run_summary_into_db
+            orig_m = rop.build_manual_council_review_matrix
+            rop.import_run_summary_into_db = lambda p, s: rop.DB_WRITE_SUCCESS
+            rop.build_manual_council_review_matrix = (
+                lambda db, md, csv: (rop.MATRIX_BUILD_FAILED, 4)
+            )
+            try:
+                rc = rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            finally:
+                rop.import_run_summary_into_db = orig_s
+                rop.build_manual_council_review_matrix = orig_m
+
+            self.assertNotEqual(rc, 0)
+            summary = _read_summary_json(args.summary_dir)
+            self.assertEqual(summary["status"], "SUCCESS")
+            self.assertEqual(summary["db_write_status"], rop.DB_WRITE_SUCCESS)
+            matrix = summary["manual_council_review_matrix"]
+            self.assertTrue(matrix["attempted"])
+            self.assertFalse(matrix["success"])
+            self.assertEqual(matrix["status"], rop.MATRIX_BUILD_FAILED)
+            self.assertEqual(matrix["exit_code"], 4)
+            self.assertIsNotNone(matrix["message"])
+
+    def test_summary_json_and_md_include_matrix_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._existing_db_path(tmp)
+            out_md = Path(tmp) / "reports" / "matrix.md"
+            out_csv = Path(tmp) / "reports" / "matrix.csv"
+            args = make_args(
+                tmp,
+                write_db=str(db_path),
+                build_manual_council_review_matrix=True,
+                manual_council_review_matrix_md=str(out_md),
+                manual_council_review_matrix_csv=str(out_csv),
+            )
+            orig_s = rop.import_run_summary_into_db
+            orig_m = rop.build_manual_council_review_matrix
+            rop.import_run_summary_into_db = lambda p, s: rop.DB_WRITE_SUCCESS
+            rop.build_manual_council_review_matrix = (
+                lambda db, md, csv: (rop.MATRIX_BUILD_SUCCESS, 0)
+            )
+            try:
+                rop.execute_run(
+                    args, steps=_ok_steps(), step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            finally:
+                rop.import_run_summary_into_db = orig_s
+                rop.build_manual_council_review_matrix = orig_m
+
+            summary = _read_summary_json(args.summary_dir)
+            self.assertIn("manual_council_review_matrix", summary)
+            matrix = summary["manual_council_review_matrix"]
+            for key in (
+                "enabled", "attempted", "success", "status", "db_path",
+                "out_md", "out_csv", "exit_code", "message",
+            ):
+                self.assertIn(key, matrix)
+            self.assertEqual(matrix["out_md"], str(out_md))
+            self.assertEqual(matrix["out_csv"], str(out_csv))
+
+            md = _read_summary_md(args.summary_dir)
+            self.assertIn("Manual Council Review Matrix status", md)
+            self.assertIn("Manual Council Review Matrix Markdown", md)
+            self.assertIn("Manual Council Review Matrix CSV", md)
 
 
 if __name__ == "__main__":

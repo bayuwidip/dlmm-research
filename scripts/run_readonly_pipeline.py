@@ -127,6 +127,24 @@ RISK_DEC_REQUIRES_DB_MSG = "--import-risk-decisions-db requires --write-db"
 # The runner does not create the CSV; it fails rather than skip.
 RISK_DEC_MISSING_MSG = "Risk decisions CSV not found"
 
+# Optional Manual Council Review Matrix builder support (only active when
+# --build-manual-council-review-matrix is provided, which requires --write-db).
+# The runner calls the existing read-only report builder after the pipeline and
+# optional DB imports have completed. It reads the existing runtime DuckDB and
+# writes local generated report artifacts only; it never writes DuckDB and never
+# writes future_position_events.
+MATRIX_BUILD_NOT_REQUESTED = "NOT_REQUESTED"
+MATRIX_BUILD_PENDING = "PENDING"
+MATRIX_BUILD_SUCCESS = "SUCCESS"
+MATRIX_BUILD_FAILED = "FAILED"
+
+DEFAULT_MATRIX_OUT_MD = "reports/runtime/manual_council_review_matrix.md"
+DEFAULT_MATRIX_OUT_CSV = "reports/runtime/manual_council_review_matrix.csv"
+
+# Exact message required when --build-manual-council-review-matrix is requested
+# without --write-db (the report builder needs the existing runtime DB path).
+MATRIX_REQUIRES_DB_MSG = "--build-manual-council-review-matrix requires --write-db"
+
 
 def build_default_steps() -> List[Tuple[str, List[str]]]:
     """Return the ordered pipeline steps as (name, command-list) tuples.
@@ -462,6 +480,20 @@ def _load_risk_decisions_importer():
     return risk_dec_importer
 
 
+def _load_manual_council_review_matrix_builder():
+    """Deferred import of scripts/build_manual_council_review_matrix.py.
+
+    Imported lazily (only when --build-manual-council-review-matrix is used) so
+    a normal run never depends on the report builder module or on duckdb. The
+    builder itself defers its own duckdb import until run_report().
+    """
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import build_manual_council_review_matrix as matrix_builder  # noqa: PLC0415
+    return matrix_builder
+
+
 def import_run_summary_into_db(db_path, summary_json_path) -> str:
     """Import an already-written run summary JSON into an EXISTING DuckDB.
 
@@ -543,6 +575,37 @@ def import_risk_decisions_into_db(db_path, risk_decisions_csv) -> Tuple[str, Opt
     return status, rc
 
 
+def build_manual_council_review_matrix(
+    db_path, out_md, out_csv
+) -> Tuple[str, Optional[int]]:
+    """Build the Manual Council Review Matrix from an EXISTING DuckDB.
+
+    Reuses scripts/build_manual_council_review_matrix.py instead of duplicating
+    report logic. The builder opens the database read-only and writes only the
+    requested local report artifacts. It never writes DuckDB and never writes
+    future_position_events.
+
+    Returns (status, exit_code). status is MATRIX_BUILD_SUCCESS or
+    MATRIX_BUILD_FAILED; exit_code is the builder's return code (or None if it
+    raised). Does not raise.
+    """
+    try:
+        matrix_builder = _load_manual_council_review_matrix_builder()
+        rc = matrix_builder.run_report(
+            db_path=str(db_path),
+            out_md=str(out_md),
+            out_csv=str(out_csv),
+            limit=matrix_builder.DEFAULT_LIMIT,
+            min_runs=matrix_builder.DEFAULT_MIN_RUNS,
+            dry_run=False,
+        )
+    except Exception as exc:  # defensive: run_report normally returns a code
+        print(f"ERROR: Manual Council Review Matrix build failed: {exc}", file=sys.stderr)
+        return MATRIX_BUILD_FAILED, None
+    status = MATRIX_BUILD_SUCCESS if rc == 0 else MATRIX_BUILD_FAILED
+    return status, rc
+
+
 # --------------------------------------------------------------------------- #
 # Summary generation
 # --------------------------------------------------------------------------- #
@@ -565,6 +628,12 @@ def build_summary_dict(
     risk_decisions_db_import_status: str = RISK_DEC_IMPORT_NOT_REQUESTED,
     risk_decisions_db_exit_code: Optional[int] = None,
     risk_decisions_db_message: Optional[str] = None,
+    build_manual_council_review_matrix: bool = False,
+    manual_council_review_matrix_md: Optional[str] = None,
+    manual_council_review_matrix_csv: Optional[str] = None,
+    manual_council_review_matrix_status: str = MATRIX_BUILD_NOT_REQUESTED,
+    manual_council_review_matrix_exit_code: Optional[int] = None,
+    manual_council_review_matrix_message: Optional[str] = None,
 ) -> dict:
     return {
         "run_id": run_id,
@@ -596,6 +665,18 @@ def build_summary_dict(
             "db_path": db_path,
             "exit_code": risk_decisions_db_exit_code,
             "message": risk_decisions_db_message,
+        },
+        "manual_council_review_matrix": {
+            "enabled": build_manual_council_review_matrix,
+            "attempted": manual_council_review_matrix_status
+            in (MATRIX_BUILD_SUCCESS, MATRIX_BUILD_FAILED),
+            "success": manual_council_review_matrix_status == MATRIX_BUILD_SUCCESS,
+            "status": manual_council_review_matrix_status,
+            "db_path": db_path,
+            "out_md": manual_council_review_matrix_md,
+            "out_csv": manual_council_review_matrix_csv,
+            "exit_code": manual_council_review_matrix_exit_code,
+            "message": manual_council_review_matrix_message,
         },
         "steps": [s.to_dict() for s in outcome.steps],
     }
@@ -641,6 +722,16 @@ def build_summary_markdown(summary: dict, summary_json_path: str) -> str:
     rd = summary.get("risk_decisions_db_import") or {}
     lines.append(
         f"- **Risk decisions DB import exit code:** {rd.get('exit_code')}"
+    )
+    matrix = summary.get("manual_council_review_matrix") or {}
+    lines.append(
+        "- **Manual Council Review Matrix status:** "
+        f"{matrix.get('status', MATRIX_BUILD_NOT_REQUESTED)}"
+    )
+    lines.append(f"- **Manual Council Review Matrix Markdown:** {matrix.get('out_md')}")
+    lines.append(f"- **Manual Council Review Matrix CSV:** {matrix.get('out_csv')}")
+    lines.append(
+        f"- **Manual Council Review Matrix exit code:** {matrix.get('exit_code')}"
     )
     lines.append("")
     lines.append("## Safety Boundary")
@@ -779,6 +870,32 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
             f"is set (default: {DEFAULT_RISK_DECISIONS_CSV})."
         ),
     )
+    parser.add_argument(
+        "--build-manual-council-review-matrix",
+        action="store_true",
+        help=(
+            "After the run and optional DB imports, build the read-only Manual "
+            "Council Review Matrix from the EXISTING DuckDB. Requires --write-db. "
+            "Writes only local report artifacts; never writes DuckDB or "
+            "future_position_events."
+        ),
+    )
+    parser.add_argument(
+        "--manual-council-review-matrix-md",
+        default=DEFAULT_MATRIX_OUT_MD,
+        help=(
+            "Markdown output path used with --build-manual-council-review-matrix "
+            f"(default: {DEFAULT_MATRIX_OUT_MD})."
+        ),
+    )
+    parser.add_argument(
+        "--manual-council-review-matrix-csv",
+        default=DEFAULT_MATRIX_OUT_CSV,
+        help=(
+            "CSV output path used with --build-manual-council-review-matrix "
+            f"(default: {DEFAULT_MATRIX_OUT_CSV})."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -797,6 +914,9 @@ def print_dry_run(steps: List[Tuple[str, List[str]]], args: argparse.Namespace) 
     import_risk_flags = getattr(args, "import_risk_flags", False)
     import_risk_dec = getattr(args, "import_risk_decisions_db", False)
     risk_decisions_csv = getattr(args, "risk_decisions_csv", DEFAULT_RISK_DECISIONS_CSV)
+    build_matrix = getattr(args, "build_manual_council_review_matrix", False)
+    matrix_md = getattr(args, "manual_council_review_matrix_md", DEFAULT_MATRIX_OUT_MD)
+    matrix_csv = getattr(args, "manual_council_review_matrix_csv", DEFAULT_MATRIX_OUT_CSV)
     print(f"continue_on_ohlcv_error  : {args.continue_on_ohlcv_error}")
     print(f"log-dir                  : {args.log_dir}")
     print(f"lock-dir                 : {args.lock_dir}")
@@ -807,6 +927,9 @@ def print_dry_run(steps: List[Tuple[str, List[str]]], args: argparse.Namespace) 
     print(f"import-risk-flags        : {import_risk_flags}")
     print(f"import-risk-decisions-db : {import_risk_dec}")
     print(f"risk-decisions-csv       : {risk_decisions_csv}")
+    print(f"build-manual-council-review-matrix : {build_matrix}")
+    print(f"manual-council-review-matrix-md    : {matrix_md}")
+    print(f"manual-council-review-matrix-csv   : {matrix_csv}")
     print()
     if write_db:
         print(
@@ -837,9 +960,19 @@ def print_dry_run(steps: List[Tuple[str, List[str]]], args: argparse.Namespace) 
             f"future_position_events is never written."
         )
         print()
+    if build_matrix:
+        print(
+            f"Manual Council Review Matrix build is PLANNED but NOT executed in dry "
+            f"run: would read existing DuckDB '{write_db}' and write Markdown "
+            f"'{matrix_md}' plus CSV '{matrix_csv}'. The database is not created, "
+            f"initialized, or written during a dry run; future_position_events is "
+            f"never written."
+        )
+        print()
     print("Dry run: no runtime directories created, no lock file created, "
           "no child scripts executed, no database written, no observations "
-          "imported, no risk decisions imported.")
+          "imported, no risk decisions imported, no manual council review "
+          "matrix built.")
 
 
 def execute_run(
@@ -858,6 +991,9 @@ def execute_run(
     import_risk_flags = getattr(args, "import_risk_flags", False)
     import_risk_dec = getattr(args, "import_risk_decisions_db", False)
     risk_decisions_csv = getattr(args, "risk_decisions_csv", DEFAULT_RISK_DECISIONS_CSV)
+    build_matrix = getattr(args, "build_manual_council_review_matrix", False)
+    matrix_md = getattr(args, "manual_council_review_matrix_md", DEFAULT_MATRIX_OUT_MD)
+    matrix_csv = getattr(args, "manual_council_review_matrix_csv", DEFAULT_MATRIX_OUT_CSV)
 
     # Pre-flight: --import-observations-db is meaningless without an existing DB
     # to write into, so it requires --write-db. Fail fast before any work.
@@ -869,6 +1005,13 @@ def execute_run(
     # it requires --write-db. Fail fast before any work.
     if import_risk_dec and not write_db:
         print(f"ERROR: {RISK_DEC_REQUIRES_DB_MSG}", file=sys.stderr)
+        return 2
+
+    # Pre-flight: the Manual Council Review Matrix reads the existing runtime DB
+    # produced/updated through --write-db, so fail fast when no DB path was
+    # supplied.
+    if build_matrix and not write_db:
+        print(f"ERROR: {MATRIX_REQUIRES_DB_MSG}", file=sys.stderr)
         return 2
 
     # Pre-flight: if a DB write was requested, the DB must already exist. We
@@ -949,6 +1092,9 @@ def execute_run(
         risk_decisions_db_import_status = (
             RISK_DEC_IMPORT_PENDING if import_risk_dec else RISK_DEC_IMPORT_NOT_REQUESTED
         )
+        manual_council_review_matrix_status = (
+            MATRIX_BUILD_PENDING if build_matrix else MATRIX_BUILD_NOT_REQUESTED
+        )
         summary = build_summary_dict(
             run_id=run_id,
             started_at=started_at,
@@ -965,6 +1111,12 @@ def execute_run(
             import_risk_decisions_db=import_risk_dec,
             risk_decisions_csv=risk_decisions_csv if import_risk_dec else None,
             risk_decisions_db_import_status=risk_decisions_db_import_status,
+            build_manual_council_review_matrix=build_matrix,
+            manual_council_review_matrix_md=matrix_md if build_matrix else None,
+            manual_council_review_matrix_csv=matrix_csv if build_matrix else None,
+            manual_council_review_matrix_status=(
+                manual_council_review_matrix_status
+            ),
         )
 
         # Write the summary JSON first; the importer reads this exact file. The
@@ -1052,6 +1204,32 @@ def execute_run(
                 # Re-write artifacts with the final risk decisions import status.
                 write_summary_files(summary, summary_json_path, summary_md_path)
 
+        # Optional Manual Council Review Matrix build happens after all optional
+        # DB imports, so it sees the same runtime history that the runner just
+        # wrote/imported. It opens DuckDB read-only and writes only local report
+        # artifacts. A failed matrix build makes the runner exit non-zero, but
+        # never converts a failed pipeline into a pass.
+        matrix_build_failed = False
+        if build_matrix:
+            matrix = summary["manual_council_review_matrix"]
+            manual_council_review_matrix_status, matrix_exit_code = (
+                build_manual_council_review_matrix(write_db, matrix_md, matrix_csv)
+            )
+            matrix_build_failed = (
+                manual_council_review_matrix_status != MATRIX_BUILD_SUCCESS
+            )
+            matrix["attempted"] = True
+            matrix["success"] = not matrix_build_failed
+            matrix["status"] = manual_council_review_matrix_status
+            matrix["exit_code"] = matrix_exit_code
+            matrix["message"] = (
+                None
+                if not matrix_build_failed
+                else f"manual council review matrix build failed "
+                f"(exit_code={matrix_exit_code})"
+            )
+            write_summary_files(summary, summary_json_path, summary_md_path)
+
         print(f"Run {run_id} finished: {outcome.status}")
         if stale_lock_replaced:
             print("Note: a stale lock was detected and replaced.")
@@ -1070,12 +1248,19 @@ def execute_run(
                 f"Risk decisions import: {risk_decisions_db_import_status} -> "
                 f"{write_db} (csv={risk_decisions_csv})"
             )
+        if build_matrix:
+            print(
+                "Manual Council Review Matrix: "
+                f"{manual_council_review_matrix_status} -> "
+                f"{matrix_md}, {matrix_csv}"
+            )
 
         if (
             outcome.status != "SUCCESS"
             or db_import_failed
             or obs_import_failed
             or risk_dec_import_failed
+            or matrix_build_failed
         ):
             return 1
         return 0
@@ -1097,6 +1282,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     # work (including dry-run printing and pipeline execution).
     if getattr(args, "import_risk_decisions_db", False) and not args.write_db:
         print(f"ERROR: {RISK_DEC_REQUIRES_DB_MSG}", file=sys.stderr)
+        return 2
+
+    # --build-manual-council-review-matrix likewise requires --write-db. Enforce
+    # before any work (including dry-run printing and pipeline execution).
+    if (
+        getattr(args, "build_manual_council_review_matrix", False)
+        and not args.write_db
+    ):
+        print(f"ERROR: {MATRIX_REQUIRES_DB_MSG}", file=sys.stderr)
         return 2
 
     steps = build_default_steps()
