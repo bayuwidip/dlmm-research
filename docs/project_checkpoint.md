@@ -886,3 +886,13 @@ Completed and merged:
 
 Current next task:
 - NONE
+
+## Checkpoint: Range width calibrated 8% (PR #55)
+
+Status: housekeeping update on 2026-07-01.
+
+Completed and merged:
+- calibrate-range-width-v0-1
+
+Current next task:
+- NONE
