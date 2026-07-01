@@ -75,31 +75,9 @@ is observe-only; `live_eligibility` may never be `LIVE_ELIGIBLE_*`. See
 
 ---
 
-## Next Task: Data-Quality Guard for Malformed Pair Labels
+## Next Task
 
-The next planned work unit is a **data-quality guard for malformed pair labels**, starting
-with the **`-USDT`** case.
-
-Background: the CI run surfaced a pair labelled `-USDT` whose base token symbol is
-**blank/malformed** (empty symbol on one side of the pair). Such a pair can still be
-fetched, scored, and classified, but a missing/unverified token symbol is a data-quality
-red flag (incomplete or unverified token metadata) and **must not be paper-tested until the
-base token is positively identified and vetted**, regardless of its `strategy_class_v2` or
-score.
-
-Planned scope:
-1. Detect malformed pair labels — start with empty/blank base or quote symbol (e.g.
-   `-USDT`, `USDC-`), and consider other malformed-metadata signals.
-2. Surface the finding explicitly (a data-quality flag/column and/or report section) so
-   affected pairs are visibly quarantined from paper-test consideration.
-3. Decide enforcement point — favour a **new standalone script and/or additive validator
-   check**, consistent with the "do not modify existing scripts without targeted
-   instruction" rule. Do not refactor the working pipeline.
-4. Add corresponding validator coverage and tests for any new column/flag.
-
-Constraints unchanged: this remains research/screening, PAPER_ONLY, no wallet/execution.
-The guard is about **data trustworthiness before paper testing**, not about enabling any
-live action.
+See `docs/project_checkpoint.md` as the single source of truth for the current next task.
 
 ---
 

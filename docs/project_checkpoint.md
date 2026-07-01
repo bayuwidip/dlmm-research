@@ -1,3 +1,5 @@
+**NEXT TASK ->** Manual Council Review Matrix (see section 3h/3i for detail).
+
 # DLMM Project Checkpoint
 
 > Single short checkpoint for humans, Claude Code, and future AI sessions.
@@ -619,51 +621,11 @@ them authorizes paper entry or live execution.
 - ~~NO_ELIGIBLE_FEE_POOL fee-pool blocker diagnostics~~ — merged (#24).
 - ~~Pair stability diagnostics~~ — merged (#25).
 
-**Next recommended coding task — Candidate Deep Review Report**
+**Done — Candidate Deep Review Report + Candidate Evidence Pack**
 
-Branch: `feature/candidate-deep-review`
-
-Proposed files:
-- `scripts/build_candidate_deep_review.py`
-- `tests/test_build_candidate_deep_review.py`
-
-Purpose: create a **read-only** candidate deep-review report for the 6
-`STABLE_REVIEW_CANDIDATE` pairs (see §3g).
-
-The report should summarize, per candidate:
-- `pair_key`
-- `pair_label`
-- `observation_count`
-- `distinct_run_count`
-- strategy_class history
-- lane history
-- latest risk decision
-- latest risk action
-- latest max allowed action
-- risk flags
-- blocker history
-- OHLCV / data availability notes
-- liquidity / volume / volatility flags if available
-- manual review notes
-- data gaps
-- suggested human / council questions
-
-**Forbidden in this task** (must not be implemented):
-- authorize paper entry
-- create paper positions
-- write `future_position_events`
-- generate signals
-- access wallet / private key
-- execute swaps / LP / rebalances
-- change thresholds
-- change risk policy
-- change candidate status
-
-**Safe wording to use:** "human / council may review for future paper-simulation design
-consideration".
-
-**Unsafe wording to avoid:** `approved`, `execute`, `signal`, `live eligible`,
-`open position`, `paper trade`, `enter paper`.
+Candidate Deep Review v0.2 and Candidate Evidence Pack v0.1 are merged. See §3i for the
+completed diagnostic summary and verdicts. The active next task is the **Manual Council
+Review Matrix** (see §3h/§3i).
 
 **Earlier milestone (already merged) — Runtime / Risk Dashboard Report (#20)**
 
