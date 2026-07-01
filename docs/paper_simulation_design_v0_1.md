@@ -54,7 +54,7 @@ A hypothetical USDC-SOL position in this design is fully described at entry by:
 
 - the **entry price** (quote per base) sampled from OHLCV at the entry timestamp,
 - the **LP range** `[entry_range_low, entry_range_high]` around that entry price
-  (width is **uncalibrated** — see §5),
+  (`range_width_pct` is owner-calibrated to **0.08 (8%)** — see §5),
 - the **hypothetical notional** of `50` USD,
 - the **entry fee-velocity** — the baseline rate at which the position would be accruing
   fees at entry, expressed per unit time (see §4.3),
@@ -151,22 +151,25 @@ the rate decayed).
 
 ---
 
-## 5. REQUIRES_MANUAL_CALIBRATION
+## 5. Calibration Status
 
-> The following parameters are **intentionally left uncalibrated** in v0.1. The values below
-> are **placeholder constants clearly marked `REQUIRES_MANUAL_CALIBRATION` — they are NOT
-> recommended or invented values**. The repo owner sets them **after inspecting real
+> One of the three parameters below is now **owner-calibrated** from real USDC-SOL OHLCV;
+> the other two remain **intentionally uncalibrated** (`REQUIRES_MANUAL_CALIBRATION`). Any
+> value still marked `REQUIRES_MANUAL_CALIBRATION` is a placeholder — **not** a recommended
+> or invented value. The repo owner sets each remaining one **after inspecting real
 > USDC-SOL OHLCV** (range behaviour, typical volatility, and fee/volume rhythm). Do not
-> treat any placeholder below as a default to ship.
+> treat any remaining placeholder below as a default to ship.
 
-| Parameter | Placeholder | Meaning | How the owner calibrates it |
+| Parameter | Value | Meaning | Calibration basis / how the owner calibrates it |
 |---|---|---|---|
-| `range_width_pct` | `REQUIRES_MANUAL_CALIBRATION` | Half-width of the LP range around entry price, i.e. how far `entry_range_low`/`entry_range_high` sit from `entry_price`. | Inspect real USDC-SOL OHLCV: pick a width wide enough to stay in range through normal noise but tight enough to keep fee density meaningful. |
-| `fee_decay_window` | `REQUIRES_MANUAL_CALIBRATION` | The rolling measurement window over which fee-velocity is averaged before comparing to entry. | Inspect real USDC-SOL fee/volume rhythm; pick a window long enough to smooth noise, short enough to react before the position is truly hung. |
-| `fee_decay_threshold` | `REQUIRES_MANUAL_CALIBRATION` | The "sharp drop" ratio — the fraction of entry fee-velocity below which condition 3 triggers. | Inspect real USDC-SOL data to decide what ratio (e.g. of entry rate) genuinely signals stagnation rather than normal fluctuation. |
+| `range_width_pct` | `0.08` (8%) — **CALIBRATED 2026-07-01** | Half-width of the LP range around entry price, i.e. how far `entry_range_low`/`entry_range_high` sit from `entry_price`. | Owner-calibrated from real USDC-SOL OHLCV: `realized_volatility_pct = 5.4184` (window 2026-06-28 → 2026-07-01, 73 hourly candles), times a **1.5×** safety multiplier ≈ 8.13%, rounded to **8%** (`0.08`). Wide enough to stay in range through normal noise, tight enough to keep fee density meaningful. See `docs/decision_log.md` → DEC-20260701-001. |
+| `fee_decay_window` | `REQUIRES_MANUAL_CALIBRATION` | The rolling measurement window over which fee-velocity is averaged before comparing to entry. | **Not yet calibrable** — insufficient historical fee/TVL data (`data/pools_watchlist.csv` is a single-date snapshot, not a time series). Awaits accumulated scheduled-runner snapshots, then: inspect real USDC-SOL fee/volume rhythm; pick a window long enough to smooth noise, short enough to react before the position is truly hung. |
+| `fee_decay_threshold` | `REQUIRES_MANUAL_CALIBRATION` | The "sharp drop" ratio — the fraction of entry fee-velocity below which condition 3 triggers. | **Not yet calibrable** — same reason (no historical fee/TVL time series yet). Awaits accumulated scheduled-runner snapshots, then: inspect real USDC-SOL data to decide what ratio (e.g. of entry rate) genuinely signals stagnation rather than normal fluctuation. |
 
-Until these three are calibrated by the owner and recorded (with a decision-log entry), the
-paper model is **not implementable** and no implementation task should be proposed.
+`range_width_pct` is calibrated (see DEC-20260701-001). Until the remaining two
+(`fee_decay_window`, `fee_decay_threshold`) are also calibrated by the owner and recorded
+(with a decision-log entry), the paper model is **not implementable** and no implementation
+task should be proposed.
 
 ---
 
@@ -221,7 +224,7 @@ Every row in both tables would carry `safety_phase` and an `is_live` guard colum
 | `entry_price` | DOUBLE | Simulated entry price (quote per base) from OHLCV. |
 | `entry_range_low` | DOUBLE | Lower bound of the LP range (from `range_width_pct`). |
 | `entry_range_high` | DOUBLE | Upper bound of the LP range (from `range_width_pct`). |
-| `range_width_pct` | DOUBLE | **REQUIRES_MANUAL_CALIBRATION** (§5). |
+| `range_width_pct` | DOUBLE | Owner-calibrated **`0.08`** (8%) — see §5 and DEC-20260701-001. |
 | `stop_loss_pct` | DOUBLE | Default `0.05` (5%). Owner-decided. |
 | `stop_loss_value` | DOUBLE | `entry_value * (1 - stop_loss_pct)`; simulated. |
 | `entry_fee_velocity` | DOUBLE | Baseline fee accrual rate at entry (simulated). |
