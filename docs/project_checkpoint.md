@@ -1,4 +1,4 @@
-**NEXT TASK ->** add-rtk-agent-guidance — Add optional RTK guidance for Claude/Codex agents to reduce token usage on noisy outputs. Acceptance: update AGENTS.md or docs with RTK as optional only, use RTK for exploration/token saving, keep original commands for final validation evidence, no dependency on RTK, tests/checks pass, no runtime/trading/wallet behavior.
+**NEXT TASK ->** enable-scheduled-dry-run-cron-24h — Enable and observe a safe cron-based scheduled read-only diagnostics dry-run for 24 hours on the VPS. Acceptance: uses only --dry-run command from docs/scheduled_runner_cron_dry_run.md, records crontab line, log path, observed runs, safety banner evidence, no generated repo artifacts committed, no runtime DB writes, no wallet/live/paper-position capability.
 
 # DLMM Project Checkpoint
 
@@ -850,3 +850,16 @@ Current next task:
 
 Notes:
 PR #47 added the documentation-only cron/systemd dry-run guide. The next small improvement is optional RTK guidance to reduce token usage for noisy logs/diffs while keeping final validation on original commands.
+
+## Checkpoint: RTK Agent Guidance Done; 24h Scheduled Dry-Run Queued
+
+Status: housekeeping update on 2026-07-01.
+
+Completed and merged:
+- add-rtk-agent-guidance
+
+Current next task:
+- enable-scheduled-dry-run-cron-24h
+
+Notes:
+PR #49 added optional RTK guidance for token-saving exploration while preserving canonical final validation commands. The next step is to enable a cron-based --dry-run schedule for 24h observation only.
