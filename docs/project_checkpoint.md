@@ -1,4 +1,4 @@
-**NEXT TASK ->** scheduled-runner-cron-dry-run — Add a safe cron/systemd dry-run scheduling guide for the scheduled read-only diagnostics runner. Acceptance: documentation only, includes exact cron/systemd example commands, lock/log paths, disable/remove instructions, and safety checklist. Does not enable scheduling automatically, no wallet/live/paper-position capability.
+**NEXT TASK ->** add-rtk-agent-guidance — Add optional RTK guidance for Claude/Codex agents to reduce token usage on noisy outputs. Acceptance: update AGENTS.md or docs with RTK as optional only, use RTK for exploration/token saving, keep original commands for final validation evidence, no dependency on RTK, tests/checks pass, no runtime/trading/wallet behavior.
 
 # DLMM Project Checkpoint
 
@@ -837,3 +837,16 @@ Current next task:
 
 Notes:
 PR #45 merged the host-side commit/PR wrapper. The next step is a documentation-only cron/systemd dry-run guide for safe scheduled read-only diagnostics automation.
+
+## Checkpoint: Cron Dry-Run Guide Done; RTK Agent Guidance Queued
+
+Status: housekeeping update on 2026-07-01.
+
+Completed and merged:
+- scheduled-runner-cron-dry-run
+
+Current next task:
+- add-rtk-agent-guidance
+
+Notes:
+PR #47 added the documentation-only cron/systemd dry-run guide. The next small improvement is optional RTK guidance to reduce token usage for noisy logs/diffs while keeping final validation on original commands.
