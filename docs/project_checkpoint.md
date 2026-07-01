@@ -1,4 +1,4 @@
-**NEXT TASK ->** enable-scheduled-dry-run-cron-24h — Enable and observe a safe cron-based scheduled read-only diagnostics dry-run for 24 hours on the VPS. Acceptance: uses only --dry-run command from docs/scheduled_runner_cron_dry_run.md, records crontab line, log path, observed runs, safety banner evidence, no generated repo artifacts committed, no runtime DB writes, no wallet/live/paper-position capability.
+**NEXT TASK ->** update-readme-project-status — Update README.md to reflect the current DLMM project status and safe workflow. Documentation only; no runtime/trading/wallet behavior.
 
 # DLMM Project Checkpoint
 
@@ -863,3 +863,16 @@ Current next task:
 
 Notes:
 PR #49 added optional RTK guidance for token-saving exploration while preserving canonical final validation commands. The next step is to enable a cron-based --dry-run schedule for 24h observation only.
+
+## Checkpoint: Next Task Switched to README Update
+
+Status: owner-directed queue adjustment on 2026-07-01.
+
+Previous queued task:
+- enable-scheduled-dry-run-cron-24h
+
+Current next task:
+- update-readme-project-status
+
+Notes:
+The 24h cron dry-run task remains useful later, but the repo README should be updated first so the project landing page reflects the current safety phase, dev-loop workflow, host-side PR wrapper, scheduled dry-run documentation, and optional RTK guidance.
