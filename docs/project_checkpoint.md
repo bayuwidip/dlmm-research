@@ -1,4 +1,4 @@
-**NEXT TASK ->** scheduled-readonly-runner — build a safe scheduled read-only diagnostics runner for VPS automation. Read-only only; no wallet, signing, swap, LP add/remove, rebalance, live execution, signal generation, paper position creation, or `future_position_events` writes.
+**NEXT TASK ->** project-housekeeping-helper — add a repo-owner housekeeping helper for task_queue/checkpoint updates after merged PRs. Documentation/tooling only; no runtime trading, wallet, signing, swap, LP, rebalance, live execution, signal generation, paper position creation, or `future_position_events` writes.
 
 # DLMM Project Checkpoint
 
@@ -766,3 +766,49 @@ This smoke test did not introduce or exercise wallet, private key, seed phrase, 
 
 Important:
 Generated reports under `reports/runtime/`, `reports/argus/`, and runtime logs under `runtime/` are local generated artifacts and should not be committed.
+
+---
+
+## Checkpoint: Scheduled Runner Smoke Test Done; Housekeeping Helper Queued
+
+Status: housekeeping update after PR #41.
+
+Completed and merged:
+- scheduled-runner-smoke-test
+
+Current task queue state:
+- DONE: manual-council-review-matrix
+- DONE: wire-matrix-into-pipeline
+- DONE: scheduled-readonly-runner
+- DONE: scheduled-runner-smoke-test
+- READY: project-housekeeping-helper
+
+Current next task:
+- project-housekeeping-helper
+
+Reason:
+Repeated manual queue/checkpoint updates caused stale checkpoint references and loop BLOCKED states. The project now needs a repo-owner housekeeping helper to safely update `docs/task_queue.md` and `docs/project_checkpoint.md` after merged PRs.
+
+Scope of next task:
+- documentation/tooling only
+- mark one REVIEW task as DONE
+- optionally append one READY task
+- append checkpoint entry
+- validate queue consistency
+- include tests and documentation
+- no runtime trading behavior
+- no wallet
+- no private key
+- no seed phrase
+- no signing
+- no swap
+- no LP add/remove
+- no rebalance
+- no live execution
+- no signal generation
+- no paper position creation
+- no future_position_events writes
+
+Important:
+This helper reduces stale-doc/queue errors. It does not by itself fix Codex sandbox Git metadata being read-only; commit/PR may still need host-side handling until a separate dev-loop commit wrapper is implemented.
+
