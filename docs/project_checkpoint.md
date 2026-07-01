@@ -1,4 +1,4 @@
-**NEXT TASK ->** Manual Council Review Matrix (see section 3h/3i for detail).
+**NEXT TASK ->** wire-matrix-into-pipeline — wire `scripts/build_manual_council_review_matrix.py` into `scripts/run_readonly_pipeline.py` as an optional, additive post-pipeline step (see §3j and `docs/task_queue.md`).
 
 # DLMM Project Checkpoint
 
@@ -364,6 +364,31 @@ Current decision:
 - Do **not** change risk policy.
 - Do **not** change candidate status.
 - End diagnostic feature batch.
+
+---
+
+## 3j. Manual Council Review Matrix Merged (2026-07-01)
+
+The **Manual Council Review Matrix** milestone is complete and merged (PR #32,
+`manual-council-review-matrix`).
+
+- `scripts/build_manual_council_review_matrix.py` and its tests
+  (`tests/test_build_manual_council_review_matrix.py`) are merged.
+- Running the script produces `reports/runtime/manual_council_review_matrix.md` and
+  `reports/runtime/manual_council_review_matrix.csv`. These are **local generated
+  artifacts** under `reports/runtime/` and are **not committed** (see §7 cleanup rule).
+- Every cell in the matrix starts as `PENDING_MANUAL_REVIEW`.
+- The report is **read-only**: it changes **no candidate status** and does **not** touch
+  `future_position_events` (which remains **0**).
+
+**Filling in the manual answers is a human task.** Neither this report nor any script in the
+pipeline answers the review questions automatically — the matrix only lays out the
+`PENDING_MANUAL_REVIEW` cells for the human / council to complete. No script promotes,
+approves, or resolves any cell on its own.
+
+The script is **not yet wired into the runtime runner**; doing so (additively, behind an
+optional flag) is the next queued task (`wire-matrix-into-pipeline`, see
+`docs/task_queue.md`).
 
 ---
 
