@@ -740,3 +740,29 @@ Scope of next task:
 
 Important:
 scheduled-readonly-runner is not a paper engine and not a live bot. It is only an automation wrapper for read-only diagnostics.
+
+---
+
+## Checkpoint: Scheduled Runner Smoke Test Completed
+
+Status: local smoke test completed for `scheduled-runner-smoke-test`.
+
+Commands exercised:
+- `python3 scripts/run_scheduled_readonly_diagnostics.py --dry-run --db-path runtime/dlmm.duckdb`
+- `python3 scripts/run_scheduled_readonly_diagnostics.py --db-path runtime/dlmm.duckdb --skip-pipeline`
+
+Result:
+- Dry-run succeeded.
+- Controlled non-dry-run succeeded.
+- Local scheduled-run log was written under `runtime/logs/`.
+- Runtime DB path used: `runtime/dlmm.duckdb`.
+- `future_position_events` precheck count: 0.
+- `future_position_events` postcheck count: 0.
+- Inspector post-run count: 0.
+- Safety result: PASS.
+
+Safety boundary:
+This smoke test did not introduce or exercise wallet, private key, seed phrase, signing, swap, LP add/remove, rebalance, live execution, signal generation, paper position creation, or `future_position_events` write capability.
+
+Important:
+Generated reports under `reports/runtime/`, `reports/argus/`, and runtime logs under `runtime/` are local generated artifacts and should not be committed.
