@@ -298,5 +298,44 @@ the guard is intentionally and explicitly revised — not by ad-hoc override.
 
 ---
 
+## DEC-20260701-001 — Range Width Calibrated (paper simulation v0.1, USDC-SOL)
+
+**Date:** 2026-07-01
+**Decision:** The paper-simulation v0.1 parameter `range_width_pct` is now **owner-calibrated
+to `0.08` (8%)**, replacing its previous `REQUIRES_MANUAL_CALIBRATION` placeholder in
+`docs/paper_simulation_design_v0_1.md` §5 (and the matching comment in
+`docs/paper_ledger_schema_v0_1.sql`). This is a **design-only** calibration: no code runs,
+no simulation runs, no runtime DuckDB rows are written, and `future_position_events` stays
+at count **0**.
+
+**Calibration basis:** Real USDC-SOL OHLCV from `data/ohlcv_top_pairs.csv`:
+- `realized_volatility_pct = 5.4184`
+- window **2026-06-28T10:00:00+00:00 → 2026-07-01T10:00:00+00:00**
+- **73 hourly candles** (`data_completeness_pct = 100.0`, `ohlcv_status = OK`)
+- safety multiplier: **1.5×**
+- `5.4184% × 1.5 ≈ 8.13%`, rounded to **8%** → `range_width_pct = 0.08`
+
+The half-width of `0.08` is wide enough to stay in range through normal USDC-SOL noise but
+tight enough to keep fee density meaningful.
+
+**Fee-decay parameters remain uncalibrated:** `fee_decay_window` and `fee_decay_threshold`
+stay `REQUIRES_MANUAL_CALIBRATION`. There is **insufficient historical fee/TVL data** to
+calibrate them — `data/pools_watchlist.csv` is a **single-date snapshot, not a time
+series**. These two await **accumulated scheduled-runner snapshots** (a real fee/volume time
+series) before they can be calibrated, at which point a separate decision-log entry will
+record their values.
+
+**Scope limits (what this decision does NOT assert):**
+- This is a documentation calibration only. It authorizes **no** paper entry, paper trade,
+  open position, simulation run, signal, wallet, private key, signing, swap, LP add/remove,
+  rebalance, or live execution.
+- Phase is unchanged: **READ_ONLY / RESEARCH_ONLY / SCREENING_ONLY / PAPER_ONLY**.
+  `validation_gate` stays **red**; `max_allowed_action` stays **PAPER_ONLY**.
+- The paper model remains **not implementable**: the two fee-decay parameters are still
+  uncalibrated, and council/human approval plus an implementation-authorizing decision-log
+  entry are still required before any implementation task is proposed.
+
+---
+
 *This log is append-only. Do not edit or delete past entries.*
 *New decisions are added at the bottom.*

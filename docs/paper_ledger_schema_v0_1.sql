@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS paper_positions (
     entry_price         DOUBLE,              -- simulated entry price (quote per base)
     entry_range_low     DOUBLE,              -- LP range lower bound
     entry_range_high    DOUBLE,              -- LP range upper bound
-    range_width_pct     DOUBLE,              -- REQUIRES_MANUAL_CALIBRATION (owner sets from real USDC-SOL OHLCV)
+    range_width_pct     DOUBLE,              -- CALIBRATED 0.08 (8%) 2026-07-01 from real USDC-SOL OHLCV; see DEC-20260701-001
     stop_loss_pct       DOUBLE,              -- default 0.05 (5%), owner-decided
     stop_loss_value     DOUBLE,              -- entry_value * (1 - stop_loss_pct); simulated
     entry_fee_velocity  DOUBLE,              -- baseline fee accrual rate at entry (simulated)
