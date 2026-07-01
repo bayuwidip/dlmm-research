@@ -1,4 +1,4 @@
-**NEXT TASK ->** wire-matrix-into-pipeline — wire `scripts/build_manual_council_review_matrix.py` into `scripts/run_readonly_pipeline.py` as an optional, additive post-pipeline step (see §3j and `docs/task_queue.md`).
+**NEXT TASK ->** scheduled-readonly-runner — build a safe scheduled read-only diagnostics runner for VPS automation. Read-only only; no wallet, signing, swap, LP add/remove, rebalance, live execution, signal generation, paper position creation, or `future_position_events` writes.
 
 # DLMM Project Checkpoint
 
@@ -386,9 +386,9 @@ pipeline answers the review questions automatically — the matrix only lays out
 `PENDING_MANUAL_REVIEW` cells for the human / council to complete. No script promotes,
 approves, or resolves any cell on its own.
 
-The script is **not yet wired into the runtime runner**; doing so (additively, behind an
-optional flag) is the next queued task (`wire-matrix-into-pipeline`, see
-`docs/task_queue.md`).
+The script has been wired into the runtime runner as an optional post-pipeline step
+(PR #35, `wire-matrix-into-pipeline`). The next queued task is now
+`scheduled-readonly-runner`, see `docs/task_queue.md`.
 
 ---
 
@@ -649,8 +649,8 @@ them authorizes paper entry or live execution.
 **Done — Candidate Deep Review Report + Candidate Evidence Pack**
 
 Candidate Deep Review v0.2 and Candidate Evidence Pack v0.1 are merged. See §3i for the
-completed diagnostic summary and verdicts. The active next task is the **Manual Council
-Review Matrix** (see §3h/§3i).
+completed diagnostic summary and verdicts. The Manual Council Review Matrix is DONE.
+The active next task is the **scheduled-readonly-runner** automation task.
 
 **Earlier milestone (already merged) — Runtime / Risk Dashboard Report (#20)**
 
