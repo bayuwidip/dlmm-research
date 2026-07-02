@@ -80,6 +80,7 @@ class PlanTests(unittest.TestCase):
             )
             self.assertIn("scripts/run_readonly_pipeline.py", commands[0].argv)
             self.assertIn("--import-risk-decisions-db", commands[0].argv)
+            self.assertIn("--import-fee-tvl-observations-db", commands[0].argv)
             self.assertIn("scripts/build_runtime_risk_dashboard.py", commands[1].argv)
 
     def test_skip_flags_narrow_the_plan(self):

@@ -232,6 +232,7 @@ def build_commands(args: argparse.Namespace) -> List[PlannedCommand]:
             "--import-observations-db",
             "--import-risk-flags",
             "--import-risk-decisions-db",
+            "--import-fee-tvl-observations-db",
         ]
         if args.continue_on_ohlcv_error:
             pipeline.append("--continue-on-ohlcv-error")
