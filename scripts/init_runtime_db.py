@@ -181,6 +181,22 @@ CREATE TABLE IF NOT EXISTS risk_decisions (
 );
 """.strip()
 
+SCHEMA_STATEMENTS["fee_tvl_observations"] = """
+CREATE TABLE IF NOT EXISTS fee_tvl_observations (
+    observation_id          TEXT PRIMARY KEY,
+    run_id                  TEXT NOT NULL,
+    observed_at             TEXT NOT NULL,
+    pair_key                TEXT NOT NULL,
+    pair_label              TEXT,
+    pool_address            TEXT,
+    fees_active_tvl_pct     DOUBLE,
+    volume_24h_usd          DOUBLE,
+    active_tvl_usd          DOUBLE,
+    source_row_date         TEXT,
+    safety_phase            TEXT NOT NULL
+);
+""".strip()
+
 # Reserved for FUTURE paper/live phases. Schema-only. The current pipeline must
 # NOT write to this table. Its presence here is a placeholder, not a capability.
 SCHEMA_STATEMENTS["future_position_events"] = """

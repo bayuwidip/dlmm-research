@@ -76,6 +76,12 @@ def make_args(tmp, **overrides):
         risk_decisions_csv=overrides.get(
             "risk_decisions_csv", rop.DEFAULT_RISK_DECISIONS_CSV
         ),
+        import_fee_tvl_observations_db=overrides.get(
+            "import_fee_tvl_observations_db", False
+        ),
+        pools_watchlist_csv=overrides.get(
+            "pools_watchlist_csv", rop.DEFAULT_POOLS_WATCHLIST_CSV
+        ),
         build_manual_council_review_matrix=overrides.get(
             "build_manual_council_review_matrix", False
         ),
@@ -891,6 +897,47 @@ def _write_risk_decisions_csv(tmp, rows=None, name="risk_decisions.csv"):
         writer.writeheader()
         for r in rows:
             writer.writerow(r)
+    return path
+
+
+def _write_pools_watchlist_csv(tmp, rows=None, name="pools_watchlist.csv"):
+    """Write a minimal valid pools watchlist CSV and return its path."""
+    import csv
+
+    columns = [
+        "tanggal",
+        "pool",
+        "pair",
+        "fees_active_tvl_pct",
+        "volume_24h_usd",
+        "active_tvl_usd",
+    ]
+    if rows is None:
+        rows = [
+            {
+                "tanggal": "2026-06-29",
+                "pool": "POOL_A",
+                "pair": "AAA-BBB",
+                "fees_active_tvl_pct": "1.0",
+                "volume_24h_usd": "100",
+                "active_tvl_usd": "1000",
+            },
+            {
+                "tanggal": "2026-06-29",
+                "pool": "POOL_C",
+                "pair": "CCC-DDD",
+                "fees_active_tvl_pct": "2.0",
+                "volume_24h_usd": "200",
+                "active_tvl_usd": "2000",
+            },
+        ]
+    path = Path(tmp) / "data" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=columns)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
     return path
 
 
@@ -2037,6 +2084,267 @@ class ManualCouncilReviewMatrixStatusTests(unittest.TestCase):
             self.assertIn("Manual Council Review Matrix status", md)
             self.assertIn("Manual Council Review Matrix Markdown", md)
             self.assertIn("Manual Council Review Matrix CSV", md)
+
+
+# --------------------------------------------------------------------------- #
+# Optional fee/TVL observations import support
+# --------------------------------------------------------------------------- #
+
+class ImportFeeTvlRequiresWriteDbTests(unittest.TestCase):
+    def test_requires_write_db_fails_before_pipeline(self):
+        called = {"execute": False}
+
+        def boom_execute(*a, **k):  # pragma: no cover - must never run
+            called["execute"] = True
+            raise AssertionError("pipeline ran without --write-db")
+
+        original = rop.execute_run
+        rop.execute_run = boom_execute
+        err = io.StringIO()
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                rc = rop.main(["--import-fee-tvl-observations-db"])
+        finally:
+            rop.execute_run = original
+
+        self.assertEqual(rc, 2)
+        self.assertFalse(called["execute"])
+        self.assertIn(rop.FEE_TVL_REQUIRES_DB_MSG, err.getvalue())
+
+    def test_requires_write_db_also_blocks_dry_run(self):
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            rc = rop.main(["--dry-run", "--import-fee-tvl-observations-db"])
+        self.assertEqual(rc, 2)
+        self.assertIn(rop.FEE_TVL_REQUIRES_DB_MSG, err.getvalue())
+
+
+class ImportFeeTvlStatusTests(unittest.TestCase):
+    def _existing_db_path(self, tmp):
+        db_path = Path(tmp) / "runtime" / "dlmm.duckdb"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db_path.write_text("placeholder")
+        return db_path
+
+    def test_default_run_does_not_import_fee_tvl_or_add_summary_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_args(tmp)
+
+            def boom(*a, **k):  # pragma: no cover - must never run
+                raise AssertionError("fee/TVL import must not run by default")
+
+            original = rop.import_fee_tvl_observations_into_db
+            rop.import_fee_tvl_observations_into_db = boom
+            try:
+                rc = rop.execute_run(
+                    args,
+                    steps=_ok_steps(),
+                    step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            finally:
+                rop.import_fee_tvl_observations_into_db = original
+
+            self.assertEqual(rc, 0)
+            summary = _read_summary_json(args.summary_dir)
+            self.assertNotIn("fee_tvl_observations_db_import", summary)
+            self.assertNotIn("fee_tvl_observations_db_import_status", summary)
+            md = _read_summary_md(args.summary_dir)
+            self.assertNotIn("Fee/TVL observations DB import status", md)
+
+    def test_fee_tvl_imported_after_summary_import(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._existing_db_path(tmp)
+            pools = _write_pools_watchlist_csv(tmp)
+            args = make_args(
+                tmp,
+                write_db=str(db_path),
+                import_fee_tvl_observations_db=True,
+                pools_watchlist_csv=str(pools),
+            )
+            order = []
+            calls = []
+
+            def fake_summary_import(p, s):
+                order.append("summary")
+                return rop.DB_WRITE_SUCCESS
+
+            def fake_fee_import(p, csv_path, run_id):
+                order.append("fee_tvl")
+                calls.append((str(p), str(csv_path), str(run_id)))
+                return rop.FEE_TVL_IMPORT_SUCCESS, 0
+
+            orig_s = rop.import_run_summary_into_db
+            orig_f = rop.import_fee_tvl_observations_into_db
+            rop.import_run_summary_into_db = fake_summary_import
+            rop.import_fee_tvl_observations_into_db = fake_fee_import
+            try:
+                rc = rop.execute_run(
+                    args,
+                    steps=_ok_steps(),
+                    step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            finally:
+                rop.import_run_summary_into_db = orig_s
+                rop.import_fee_tvl_observations_into_db = orig_f
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(order, ["summary", "fee_tvl"])
+            self.assertEqual(calls[0][0], str(db_path))
+            self.assertEqual(calls[0][1], str(pools))
+            summary = _read_summary_json(args.summary_dir)
+            self.assertEqual(calls[0][2], summary["run_id"])
+            self.assertEqual(
+                summary["fee_tvl_observations_db_import_status"],
+                rop.FEE_TVL_IMPORT_SUCCESS,
+            )
+            ft = summary["fee_tvl_observations_db_import"]
+            self.assertTrue(ft["attempted"])
+            self.assertTrue(ft["success"])
+            self.assertEqual(ft["exit_code"], 0)
+
+    def test_missing_pools_csv_fails_after_pipeline_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._existing_db_path(tmp)
+            missing = Path(tmp) / "data" / "pools_watchlist.csv"
+            args = make_args(
+                tmp,
+                write_db=str(db_path),
+                import_fee_tvl_observations_db=True,
+                pools_watchlist_csv=str(missing),
+            )
+            runner = fake_runner_factory({})
+
+            def boom_fee(*a, **k):  # pragma: no cover - must never run
+                raise AssertionError("importer called despite missing CSV")
+
+            orig_s = rop.import_run_summary_into_db
+            orig_f = rop.import_fee_tvl_observations_into_db
+            rop.import_run_summary_into_db = lambda p, s: rop.DB_WRITE_SUCCESS
+            rop.import_fee_tvl_observations_into_db = boom_fee
+            err = io.StringIO()
+            try:
+                with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                    rc = rop.execute_run(
+                        args,
+                        steps=_ok_steps(),
+                        step_runner=runner,
+                        now_fn=FakeClock(),
+                    )
+            finally:
+                rop.import_run_summary_into_db = orig_s
+                rop.import_fee_tvl_observations_into_db = orig_f
+
+            self.assertEqual(runner.calls, [name for name, _ in _ok_steps()])
+            self.assertNotEqual(rc, 0)
+            self.assertIn(rop.FEE_TVL_MISSING_MSG, err.getvalue())
+            summary = _read_summary_json(args.summary_dir)
+            self.assertEqual(
+                summary["fee_tvl_observations_db_import_status"],
+                rop.FEE_TVL_IMPORT_FAILED,
+            )
+            ft = summary["fee_tvl_observations_db_import"]
+            self.assertTrue(ft["attempted"])
+            self.assertFalse(ft["success"])
+            self.assertIsNone(ft["exit_code"])
+            self.assertFalse(missing.exists())
+
+
+@unittest.skipUnless(HAS_DUCKDB, "duckdb not installed")
+class ImportFeeTvlRealDuckDbTests(unittest.TestCase):
+    def _init_db(self, tmp):
+        db_path = Path(tmp) / "runtime" / "dlmm.duckdb"
+        idb.init_db(str(db_path))
+        return db_path
+
+    def _counts(self, db_path):
+        conn = duckdb.connect(str(db_path))
+        try:
+            return {
+                "runs": conn.execute("SELECT COUNT(*) FROM pipeline_runs").fetchone()[0],
+                "steps": conn.execute(
+                    "SELECT COUNT(*) FROM pipeline_steps"
+                ).fetchone()[0],
+                "fee": conn.execute(
+                    "SELECT COUNT(*) FROM fee_tvl_observations"
+                ).fetchone()[0],
+                "obs": conn.execute(
+                    "SELECT COUNT(*) FROM strategy_observations"
+                ).fetchone()[0],
+                "flags": conn.execute("SELECT COUNT(*) FROM risk_flags").fetchone()[0],
+                "risk_decisions": conn.execute(
+                    "SELECT COUNT(*) FROM risk_decisions"
+                ).fetchone()[0],
+                "fpe": conn.execute(
+                    "SELECT COUNT(*) FROM future_position_events"
+                ).fetchone()[0],
+            }
+        finally:
+            conn.close()
+
+    def test_successful_run_imports_fee_tvl_without_other_observation_steps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._init_db(tmp)
+            pools = _write_pools_watchlist_csv(tmp)
+            args = make_args(
+                tmp,
+                write_db=str(db_path),
+                import_fee_tvl_observations_db=True,
+                pools_watchlist_csv=str(pools),
+            )
+            with redirect_stdout(io.StringIO()):
+                rc = rop.execute_run(
+                    args,
+                    steps=_ok_steps(),
+                    step_runner=fake_runner_factory({}),
+                    now_fn=FakeClock(),
+                )
+            self.assertEqual(rc, 0)
+            counts = self._counts(db_path)
+            self.assertEqual(counts["runs"], 1)
+            self.assertEqual(counts["steps"], len(_ok_steps()))
+            self.assertEqual(counts["fee"], 2)
+            self.assertEqual(counts["obs"], 0)
+            self.assertEqual(counts["flags"], 0)
+            self.assertEqual(counts["risk_decisions"], 0)
+            self.assertEqual(counts["fpe"], 0)
+            summary = _read_summary_json(args.summary_dir)
+            self.assertEqual(
+                summary["fee_tvl_observations_db_import_status"],
+                rop.FEE_TVL_IMPORT_SUCCESS,
+            )
+
+    def test_reimport_same_run_id_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._init_db(tmp)
+            pools = _write_pools_watchlist_csv(tmp)
+            args = make_args(
+                tmp,
+                write_db=str(db_path),
+                import_fee_tvl_observations_db=True,
+                pools_watchlist_csv=str(pools),
+            )
+            clock = FakeClock()
+            with redirect_stdout(io.StringIO()):
+                rc = rop.execute_run(
+                    args,
+                    steps=_ok_steps(),
+                    step_runner=fake_runner_factory({}),
+                    now_fn=clock,
+                )
+            self.assertEqual(rc, 0)
+            summary = _read_summary_json(args.summary_dir)
+            importer = rop._load_fee_tvl_observations_importer()
+            with redirect_stdout(io.StringIO()):
+                rc2 = importer.run_import(
+                    db_path=str(db_path),
+                    pools_watchlist_csv=str(pools),
+                    run_id=summary["run_id"],
+                    dry_run=False,
+                )
+            self.assertEqual(rc2, 0)
+            self.assertEqual(self._counts(db_path)["fee"], 2)
 
 
 if __name__ == "__main__":
