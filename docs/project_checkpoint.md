@@ -1,4 +1,4 @@
-**NEXT TASK ->** fee-tvl-observations-table — Add an append-only fee_tvl_observations table so fee/TVL history accumulates over time, needed to calibrate fee_decay_window/fee_decay_threshold. See docs/task_queue.md.
+**NEXT TASK ->** NONE — no READY task currently queued.
 
 # DLMM Project Checkpoint
 
@@ -893,6 +893,16 @@ Status: housekeeping update on 2026-07-01.
 
 Completed and merged:
 - calibrate-range-width-v0-1
+
+Current next task:
+- NONE
+
+## Checkpoint: Fee/TVL observations table merged (PR #56)
+
+Status: housekeeping update on 2026-07-02.
+
+Completed and merged:
+- fee-tvl-observations-table
 
 Current next task:
 - NONE
