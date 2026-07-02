@@ -84,6 +84,7 @@ class TestSchemaSql(unittest.TestCase):
             "strategy_observations",
             "risk_flags",
             "risk_decisions",
+            "fee_tvl_observations",
             "future_position_events",
         }
         self.assertEqual(set(idb.REQUIRED_TABLES), expected)
@@ -219,6 +220,39 @@ class TestInitDb(unittest.TestCase):
             self.assertIn("risk_decision_id", cols)
             self.assertIn("imported_at", cols)
             self.assertIn("source_csv", cols)
+
+    def test_fee_tvl_observations_table_exists_after_init(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "runtime" / "dlmm.duckdb"
+            idb.init_db(str(db_path))
+            conn = duckdb.connect(str(db_path))
+            try:
+                present = idb.list_tables(conn)
+                cols = {
+                    r[1]
+                    for r in conn.execute(
+                        "PRAGMA table_info('fee_tvl_observations')"
+                    ).fetchall()
+                }
+            finally:
+                conn.close()
+            self.assertIn("fee_tvl_observations", present)
+            self.assertEqual(
+                cols,
+                {
+                    "observation_id",
+                    "run_id",
+                    "observed_at",
+                    "pair_key",
+                    "pair_label",
+                    "pool_address",
+                    "fees_active_tvl_pct",
+                    "volume_24h_usd",
+                    "active_tvl_usd",
+                    "source_row_date",
+                    "safety_phase",
+                },
+            )
 
     def test_schema_meta_row_exists_with_version_one(self):
         with tempfile.TemporaryDirectory() as tmp:

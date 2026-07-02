@@ -127,6 +127,26 @@ RISK_DEC_REQUIRES_DB_MSG = "--import-risk-decisions-db requires --write-db"
 # The runner does not create the CSV; it fails rather than skip.
 RISK_DEC_MISSING_MSG = "Risk decisions CSV not found"
 
+# Optional fee/TVL observations import support (only active when
+# --import-fee-tvl-observations-db is provided, which itself requires
+# --write-db). The runner NEVER creates the DB or pools watchlist CSV; it only
+# imports an already-written data/pools_watchlist.csv into an EXISTING DB via
+# the fee/TVL observations importer. DB writes stay limited to
+# fee_tvl_observations; future_position_events is never written.
+FEE_TVL_IMPORT_NOT_REQUESTED = "NOT_REQUESTED"
+FEE_TVL_IMPORT_PENDING = "PENDING"
+FEE_TVL_IMPORT_SUCCESS = "SUCCESS"
+FEE_TVL_IMPORT_FAILED = "FAILED"
+
+DEFAULT_POOLS_WATCHLIST_CSV = "data/pools_watchlist.csv"
+
+# Exact message required when --import-fee-tvl-observations-db is requested
+# without --write-db.
+FEE_TVL_REQUIRES_DB_MSG = "--import-fee-tvl-observations-db requires --write-db"
+
+# Message when the pools watchlist CSV is missing but its import was requested.
+FEE_TVL_MISSING_MSG = "Pools watchlist CSV not found"
+
 # Optional Manual Council Review Matrix builder support (only active when
 # --build-manual-council-review-matrix is provided, which requires --write-db).
 # The runner calls the existing read-only report builder after the pipeline and
@@ -436,6 +456,11 @@ def risk_decisions_file_present(risk_decisions_csv) -> bool:
     return Path(risk_decisions_csv).is_file()
 
 
+def pools_watchlist_file_present(pools_watchlist_csv) -> bool:
+    """Return True only if pools_watchlist_csv points to an existing file."""
+    return Path(pools_watchlist_csv).is_file()
+
+
 def _load_importer():
     """Deferred import of scripts/import_run_summary_to_db.py.
 
@@ -478,6 +503,15 @@ def _load_risk_decisions_importer():
         sys.path.insert(0, scripts_dir)
     import import_risk_decisions_to_db as risk_dec_importer  # noqa: PLC0415
     return risk_dec_importer
+
+
+def _load_fee_tvl_observations_importer():
+    """Deferred import of scripts/import_fee_tvl_observations_to_db.py."""
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import import_fee_tvl_observations_to_db as fee_tvl_importer  # noqa: PLC0415
+    return fee_tvl_importer
 
 
 def _load_manual_council_review_matrix_builder():
@@ -575,6 +609,33 @@ def import_risk_decisions_into_db(db_path, risk_decisions_csv) -> Tuple[str, Opt
     return status, rc
 
 
+def import_fee_tvl_observations_into_db(
+    db_path, pools_watchlist_csv, run_id
+) -> Tuple[str, Optional[int]]:
+    """Import EXISTING pools_watchlist.csv fee/TVL rows into an EXISTING DuckDB.
+
+    Reuses scripts/import_fee_tvl_observations_to_db.py instead of duplicating
+    SQL, so the importer's guarantees hold: it writes ONLY to
+    fee_tvl_observations and never to pipeline_runs, pipeline_steps,
+    strategy_observations, risk_flags, risk_decisions, or
+    future_position_events. The importer is idempotent per run_id/pair. Never
+    creates or initializes the database, and never creates the CSV.
+    """
+    try:
+        fee_tvl_importer = _load_fee_tvl_observations_importer()
+        rc = fee_tvl_importer.run_import(
+            db_path=str(db_path),
+            pools_watchlist_csv=str(pools_watchlist_csv),
+            run_id=str(run_id),
+            dry_run=False,
+        )
+    except Exception as exc:  # defensive: run_import normally returns a code
+        print(f"ERROR: fee/TVL observations DuckDB import failed: {exc}", file=sys.stderr)
+        return FEE_TVL_IMPORT_FAILED, None
+    status = FEE_TVL_IMPORT_SUCCESS if rc == 0 else FEE_TVL_IMPORT_FAILED
+    return status, rc
+
+
 def build_manual_council_review_matrix(
     db_path, out_md, out_csv
 ) -> Tuple[str, Optional[int]]:
@@ -628,6 +689,11 @@ def build_summary_dict(
     risk_decisions_db_import_status: str = RISK_DEC_IMPORT_NOT_REQUESTED,
     risk_decisions_db_exit_code: Optional[int] = None,
     risk_decisions_db_message: Optional[str] = None,
+    import_fee_tvl_observations_db: bool = False,
+    pools_watchlist_csv: Optional[str] = None,
+    fee_tvl_observations_db_import_status: str = FEE_TVL_IMPORT_NOT_REQUESTED,
+    fee_tvl_observations_db_exit_code: Optional[int] = None,
+    fee_tvl_observations_db_message: Optional[str] = None,
     build_manual_council_review_matrix: bool = False,
     manual_council_review_matrix_md: Optional[str] = None,
     manual_council_review_matrix_csv: Optional[str] = None,
@@ -635,7 +701,7 @@ def build_summary_dict(
     manual_council_review_matrix_exit_code: Optional[int] = None,
     manual_council_review_matrix_message: Optional[str] = None,
 ) -> dict:
-    return {
+    summary = {
         "run_id": run_id,
         "started_at": started_at.isoformat(),
         "ended_at": ended_at.isoformat(),
@@ -680,6 +746,24 @@ def build_summary_dict(
         },
         "steps": [s.to_dict() for s in outcome.steps],
     }
+    if import_fee_tvl_observations_db:
+        summary["pools_watchlist_csv"] = pools_watchlist_csv
+        summary["fee_tvl_observations_db_import_status"] = (
+            fee_tvl_observations_db_import_status
+        )
+        summary["fee_tvl_observations_db_import"] = {
+            "enabled": True,
+            "attempted": fee_tvl_observations_db_import_status
+            in (FEE_TVL_IMPORT_SUCCESS, FEE_TVL_IMPORT_FAILED),
+            "success": (
+                fee_tvl_observations_db_import_status == FEE_TVL_IMPORT_SUCCESS
+            ),
+            "pools_watchlist_csv": pools_watchlist_csv,
+            "db_path": db_path,
+            "exit_code": fee_tvl_observations_db_exit_code,
+            "message": fee_tvl_observations_db_message,
+        }
+    return summary
 
 
 def build_summary_markdown(summary: dict, summary_json_path: str) -> str:
@@ -723,6 +807,16 @@ def build_summary_markdown(summary: dict, summary_json_path: str) -> str:
     lines.append(
         f"- **Risk decisions DB import exit code:** {rd.get('exit_code')}"
     )
+    if "fee_tvl_observations_db_import" in summary:
+        ft = summary.get("fee_tvl_observations_db_import") or {}
+        lines.append(
+            "- **Fee/TVL observations DB import status:** "
+            f"{summary.get('fee_tvl_observations_db_import_status', FEE_TVL_IMPORT_NOT_REQUESTED)}"
+        )
+        lines.append(f"- **Pools watchlist CSV:** {summary.get('pools_watchlist_csv')}")
+        lines.append(
+            f"- **Fee/TVL observations DB import exit code:** {ft.get('exit_code')}"
+        )
     matrix = summary.get("manual_council_review_matrix") or {}
     lines.append(
         "- **Manual Council Review Matrix status:** "
@@ -871,6 +965,25 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--import-fee-tvl-observations-db",
+        action="store_true",
+        help=(
+            "After the run, also import fee/TVL observations from the pools "
+            "watchlist CSV into the EXISTING DuckDB (fee_tvl_observations only, "
+            "idempotent per run_id). Requires --write-db. Never writes "
+            "future_position_events; never creates the DB or the CSV."
+        ),
+    )
+    parser.add_argument(
+        "--pools-watchlist-csv",
+        default=DEFAULT_POOLS_WATCHLIST_CSV,
+        help=(
+            "Path to pools_watchlist.csv imported when "
+            "--import-fee-tvl-observations-db is set "
+            f"(default: {DEFAULT_POOLS_WATCHLIST_CSV})."
+        ),
+    )
+    parser.add_argument(
         "--build-manual-council-review-matrix",
         action="store_true",
         help=(
@@ -914,6 +1027,8 @@ def print_dry_run(steps: List[Tuple[str, List[str]]], args: argparse.Namespace) 
     import_risk_flags = getattr(args, "import_risk_flags", False)
     import_risk_dec = getattr(args, "import_risk_decisions_db", False)
     risk_decisions_csv = getattr(args, "risk_decisions_csv", DEFAULT_RISK_DECISIONS_CSV)
+    import_fee_tvl = getattr(args, "import_fee_tvl_observations_db", False)
+    pools_watchlist_csv = getattr(args, "pools_watchlist_csv", DEFAULT_POOLS_WATCHLIST_CSV)
     build_matrix = getattr(args, "build_manual_council_review_matrix", False)
     matrix_md = getattr(args, "manual_council_review_matrix_md", DEFAULT_MATRIX_OUT_MD)
     matrix_csv = getattr(args, "manual_council_review_matrix_csv", DEFAULT_MATRIX_OUT_CSV)
@@ -927,6 +1042,9 @@ def print_dry_run(steps: List[Tuple[str, List[str]]], args: argparse.Namespace) 
     print(f"import-risk-flags        : {import_risk_flags}")
     print(f"import-risk-decisions-db : {import_risk_dec}")
     print(f"risk-decisions-csv       : {risk_decisions_csv}")
+    if import_fee_tvl:
+        print(f"import-fee-tvl-observations-db : {import_fee_tvl}")
+        print(f"pools-watchlist-csv            : {pools_watchlist_csv}")
     print(f"build-manual-council-review-matrix : {build_matrix}")
     print(f"manual-council-review-matrix-md    : {matrix_md}")
     print(f"manual-council-review-matrix-csv   : {matrix_csv}")
@@ -960,6 +1078,15 @@ def print_dry_run(steps: List[Tuple[str, List[str]]], args: argparse.Namespace) 
             f"future_position_events is never written."
         )
         print()
+    if import_fee_tvl:
+        print(
+            f"Fee/TVL observations import is PLANNED but NOT executed in dry run: "
+            f"would import pools watchlist CSV '{pools_watchlist_csv}' into "
+            f"existing DuckDB '{write_db}' (fee_tvl_observations only, "
+            f"idempotent per run_id). The database and CSV are not created or "
+            f"touched during a dry run; future_position_events is never written."
+        )
+        print()
     if build_matrix:
         print(
             f"Manual Council Review Matrix build is PLANNED but NOT executed in dry "
@@ -991,6 +1118,8 @@ def execute_run(
     import_risk_flags = getattr(args, "import_risk_flags", False)
     import_risk_dec = getattr(args, "import_risk_decisions_db", False)
     risk_decisions_csv = getattr(args, "risk_decisions_csv", DEFAULT_RISK_DECISIONS_CSV)
+    import_fee_tvl = getattr(args, "import_fee_tvl_observations_db", False)
+    pools_watchlist_csv = getattr(args, "pools_watchlist_csv", DEFAULT_POOLS_WATCHLIST_CSV)
     build_matrix = getattr(args, "build_manual_council_review_matrix", False)
     matrix_md = getattr(args, "manual_council_review_matrix_md", DEFAULT_MATRIX_OUT_MD)
     matrix_csv = getattr(args, "manual_council_review_matrix_csv", DEFAULT_MATRIX_OUT_CSV)
@@ -1005,6 +1134,12 @@ def execute_run(
     # it requires --write-db. Fail fast before any work.
     if import_risk_dec and not write_db:
         print(f"ERROR: {RISK_DEC_REQUIRES_DB_MSG}", file=sys.stderr)
+        return 2
+
+    # Pre-flight: --import-fee-tvl-observations-db likewise requires an
+    # existing DB, so it requires --write-db. Fail fast before any work.
+    if import_fee_tvl and not write_db:
+        print(f"ERROR: {FEE_TVL_REQUIRES_DB_MSG}", file=sys.stderr)
         return 2
 
     # Pre-flight: the Manual Council Review Matrix reads the existing runtime DB
@@ -1092,6 +1227,9 @@ def execute_run(
         risk_decisions_db_import_status = (
             RISK_DEC_IMPORT_PENDING if import_risk_dec else RISK_DEC_IMPORT_NOT_REQUESTED
         )
+        fee_tvl_observations_db_import_status = (
+            FEE_TVL_IMPORT_PENDING if import_fee_tvl else FEE_TVL_IMPORT_NOT_REQUESTED
+        )
         manual_council_review_matrix_status = (
             MATRIX_BUILD_PENDING if build_matrix else MATRIX_BUILD_NOT_REQUESTED
         )
@@ -1111,6 +1249,11 @@ def execute_run(
             import_risk_decisions_db=import_risk_dec,
             risk_decisions_csv=risk_decisions_csv if import_risk_dec else None,
             risk_decisions_db_import_status=risk_decisions_db_import_status,
+            import_fee_tvl_observations_db=import_fee_tvl,
+            pools_watchlist_csv=pools_watchlist_csv if import_fee_tvl else None,
+            fee_tvl_observations_db_import_status=(
+                fee_tvl_observations_db_import_status
+            ),
             build_manual_council_review_matrix=build_matrix,
             manual_council_review_matrix_md=matrix_md if build_matrix else None,
             manual_council_review_matrix_csv=matrix_csv if build_matrix else None,
@@ -1161,6 +1304,9 @@ def execute_run(
         # before the importer. If it is still missing the import fails (the runner
         # never creates the CSV and never calls the importer); otherwise it imports
         # with upsert.
+        #
+        # pools_watchlist.csv is also produced by a runtime pipeline step, so its
+        # existence is checked post-pipeline immediately before fee/TVL import.
         risk_dec_import_failed = False
         if import_risk_dec:
             rd = summary["risk_decisions_db_import"]
@@ -1202,6 +1348,51 @@ def execute_run(
                     else f"risk decisions import failed (exit_code={risk_dec_exit_code})"
                 )
                 # Re-write artifacts with the final risk decisions import status.
+                write_summary_files(summary, summary_json_path, summary_md_path)
+
+        # Optional fee/TVL observations import happens after the other DB
+        # imports, using this runner's run_id for idempotency. It writes only to
+        # fee_tvl_observations, never future_position_events.
+        fee_tvl_import_failed = False
+        if import_fee_tvl:
+            ft = summary["fee_tvl_observations_db_import"]
+            if not pools_watchlist_file_present(pools_watchlist_csv):
+                fee_tvl_observations_db_import_status = FEE_TVL_IMPORT_FAILED
+                fee_tvl_import_failed = True
+                summary["fee_tvl_observations_db_import_status"] = (
+                    fee_tvl_observations_db_import_status
+                )
+                ft["attempted"] = True
+                ft["success"] = False
+                ft["exit_code"] = None
+                ft["message"] = f"{FEE_TVL_MISSING_MSG}: {pools_watchlist_csv}"
+                print(
+                    f"ERROR: {FEE_TVL_MISSING_MSG}: {pools_watchlist_csv}. "
+                    "This runner does not create the pools watchlist CSV.",
+                    file=sys.stderr,
+                )
+                write_summary_files(summary, summary_json_path, summary_md_path)
+            else:
+                fee_tvl_observations_db_import_status, fee_tvl_exit_code = (
+                    import_fee_tvl_observations_into_db(
+                        write_db, pools_watchlist_csv, run_id
+                    )
+                )
+                fee_tvl_import_failed = (
+                    fee_tvl_observations_db_import_status != FEE_TVL_IMPORT_SUCCESS
+                )
+                summary["fee_tvl_observations_db_import_status"] = (
+                    fee_tvl_observations_db_import_status
+                )
+                ft["attempted"] = True
+                ft["success"] = not fee_tvl_import_failed
+                ft["exit_code"] = fee_tvl_exit_code
+                ft["message"] = (
+                    None
+                    if not fee_tvl_import_failed
+                    else f"fee/TVL observations import failed "
+                    f"(exit_code={fee_tvl_exit_code})"
+                )
                 write_summary_files(summary, summary_json_path, summary_md_path)
 
         # Optional Manual Council Review Matrix build happens after all optional
@@ -1248,6 +1439,12 @@ def execute_run(
                 f"Risk decisions import: {risk_decisions_db_import_status} -> "
                 f"{write_db} (csv={risk_decisions_csv})"
             )
+        if import_fee_tvl:
+            print(
+                "Fee/TVL observations import: "
+                f"{fee_tvl_observations_db_import_status} -> "
+                f"{write_db} (csv={pools_watchlist_csv})"
+            )
         if build_matrix:
             print(
                 "Manual Council Review Matrix: "
@@ -1260,6 +1457,7 @@ def execute_run(
             or db_import_failed
             or obs_import_failed
             or risk_dec_import_failed
+            or fee_tvl_import_failed
             or matrix_build_failed
         ):
             return 1
@@ -1282,6 +1480,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     # work (including dry-run printing and pipeline execution).
     if getattr(args, "import_risk_decisions_db", False) and not args.write_db:
         print(f"ERROR: {RISK_DEC_REQUIRES_DB_MSG}", file=sys.stderr)
+        return 2
+
+    # --import-fee-tvl-observations-db likewise requires --write-db. Enforce
+    # before any work (including dry-run printing and pipeline execution).
+    if getattr(args, "import_fee_tvl_observations_db", False) and not args.write_db:
+        print(f"ERROR: {FEE_TVL_REQUIRES_DB_MSG}", file=sys.stderr)
         return 2
 
     # --build-manual-council-review-matrix likewise requires --write-db. Enforce
